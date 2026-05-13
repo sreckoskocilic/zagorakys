@@ -233,6 +233,135 @@ pub async fn get_mobi_page(path: String, page: usize) -> Result<MobiPage, String
     })
 }
 
+fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, String> {
+    use std::io::Read;
+
+    let ext = input_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if ext == "cbz" || ext == "zip" {
+        let data = fs::read(input_path).map_err(|e| format!("Cannot read: {e}"))?;
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&data))
+            .map_err(|e| format!("Cannot open CBZ: {e}"))?;
+
+        let mut names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let file = archive.by_index(i).ok()?;
+                let name = file.name().to_string();
+                let lower = name.to_lowercase();
+                if lower.ends_with(".jpg")
+                    || lower.ends_with(".jpeg")
+                    || lower.ends_with(".png")
+                    || lower.ends_with(".webp")
+                {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        names.sort();
+
+        let mut count = 0;
+        for name in &names {
+            if let Ok(mut file) = archive.by_name(name) {
+                let mut buf = Vec::new();
+                if file.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+                    let out_name = format!("{:04}.jpg", count);
+                    if fs::write(dest_dir.join(&out_name), &buf).is_ok() {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        Ok(count)
+    } else if ext == "cbr" || ext == "rar" {
+        #[cfg(windows)]
+        hide_console_window();
+
+        let unrar = find_unrar().ok_or_else(|| {
+            "unrar not found. Install unrar (brew install unrar / apt install unrar)".to_string()
+        })?;
+
+        let status = std::process::Command::new(&unrar)
+            .args(["e", "-o+", "-inul", "--"])
+            .arg(input_path)
+            .arg(dest_dir)
+            .status()
+            .map_err(|e| format!("Failed to run unrar: {e}"))?;
+
+        if !status.success() {
+            let _ = std::process::Command::new(&unrar)
+                .args(["e", "-o+", "--"])
+                .arg(input_path)
+                .arg(dest_dir)
+                .status();
+        }
+
+        let mut images: Vec<PathBuf> = fs::read_dir(dest_dir)
+            .map_err(|e| format!("Cannot read temp dir: {e}"))?
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                let ext = path.extension()?.to_str()?.to_lowercase();
+                if ["jpg", "jpeg", "png", "webp"].contains(&ext.as_str()) {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        images.sort();
+
+        let count = images.len();
+        for (i, img_path) in images.iter().enumerate() {
+            let new_name = format!("{:04}.jpg", i);
+            let new_path = dest_dir.join(&new_name);
+            if *img_path != new_path {
+                let _ = fs::rename(img_path, &new_path);
+            }
+        }
+        Ok(count)
+    } else {
+        Err(format!("Unsupported format: {ext}"))
+    }
+}
+
+fn find_unrar() -> Option<PathBuf> {
+    let candidates = if cfg!(windows) {
+        vec![
+            r"C:\Program Files\WinRAR\UnRAR.exe".to_string(),
+            r"C:\Program Files (x86)\WinRAR\UnRAR.exe".to_string(),
+            "unrar.exe".to_string(),
+        ]
+    } else {
+        vec![
+            "/usr/local/bin/unrar".to_string(),
+            "/opt/homebrew/bin/unrar".to_string(),
+            "/usr/bin/unrar".to_string(),
+            "unrar".to_string(),
+        ]
+    };
+    for c in candidates {
+        let p = PathBuf::from(&c);
+        if p.exists() {
+            return Some(p);
+        }
+        if std::process::Command::new(&c)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return Some(PathBuf::from(c));
+        }
+    }
+    None
+}
+
 fn optimize_cbz(
     input_path: &Path,
     output_path: &Path,
@@ -275,8 +404,21 @@ fn optimize_cbz(
             file.read_to_end(&mut buf).map_err(|e| format!("Read error: {e}"))?;
             entries.push((name.clone(), buf));
         }
+    } else if ext == "cbr" || ext == "rar" {
+        let tmp_dir = tempfile::TempDir::new()
+            .map_err(|e| format!("Cannot create temp dir: {e}"))?;
+        let count = extract_archive_to_dir(input_path, tmp_dir.path())?;
+        if count == 0 {
+            return Err("No images found in CBR archive".to_string());
+        }
+        for i in 0..count {
+            let img_path = tmp_dir.path().join(format!("{:04}.jpg", i));
+            if let Ok(data) = fs::read(&img_path) {
+                entries.push((format!("{:04}.jpg", i), data));
+            }
+        }
     } else {
-        return Err("CBR extraction not yet supported for Kobo optimize. Use CBZ files.".to_string());
+        return Err(format!("Unsupported format: {ext}"));
     }
 
     if entries.is_empty() {
@@ -373,8 +515,14 @@ pub async fn convert_comic(
             ..KindlingOptions::default()
         };
 
-        #[cfg(windows)]
-        ensure_bsdtar_available();
+        let tmp_dir = tempfile::TempDir::new()
+            .map_err(|e| format!("Cannot create temp dir: {e}"))?;
+
+        emit_progress(&app, 0, 1, "Extracting archive...");
+        let img_count = extract_archive_to_dir(&input_path, tmp_dir.path())?;
+        if img_count == 0 {
+            return Err("No images found in archive".to_string());
+        }
 
         #[cfg(unix)]
         let _gag = {
@@ -387,7 +535,7 @@ pub async fn convert_comic(
             })
         };
 
-        build_comic_with_options(&input_path, &mobi_path, &profile, &kindle_options)
+        build_comic_with_options(tmp_dir.path(), &mobi_path, &profile, &kindle_options)
             .map_err(|e| format!("Kindling error: {e}"))?;
 
         #[cfg(unix)]
@@ -424,34 +572,15 @@ pub async fn convert_comic(
 }
 
 #[cfg(windows)]
-fn ensure_bsdtar_available() {
-    use std::env;
+fn hide_console_window() {
     use std::sync::Once;
 
     static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        // Copy tar.exe as bsdtar.exe so kindling finds it
-        let system32 = PathBuf::from(r"C:\Windows\System32");
-        let tar = system32.join("tar.exe");
-        if tar.exists() {
-            let bin_dir = env::temp_dir().join("zagorakys_bin");
-            let _ = fs::create_dir_all(&bin_dir);
-            let link = bin_dir.join("bsdtar.exe");
-            if !link.exists() {
-                let _ = fs::copy(&tar, &link);
-            }
-            if let Ok(path) = env::var("PATH") {
-                env::set_var("PATH", format!("{};{}", bin_dir.display(), path));
-            }
-        }
-
-        // Hide console so bsdtar spawns don't flash CMD windows
-        unsafe {
-            winapi::AllocConsole();
-            let hwnd = winapi::GetConsoleWindow();
-            if !hwnd.is_null() {
-                winapi::ShowWindow(hwnd, 0); // SW_HIDE
-            }
+    INIT.call_once(|| unsafe {
+        winapi::AllocConsole();
+        let hwnd = winapi::GetConsoleWindow();
+        if !hwnd.is_null() {
+            winapi::ShowWindow(hwnd, 0);
         }
     });
 }
