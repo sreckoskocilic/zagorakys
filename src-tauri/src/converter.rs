@@ -64,7 +64,7 @@ pub async fn list_comics(dir: String) -> Result<Vec<String>, String> {
     if !dir.is_dir() {
         return Err("Not a directory".to_string());
     }
-    let exts = ["cbr", "cbz", "rar", "zip"];
+    let exts = ["cbr", "cbz", "rar", "zip", "pdf"];
     let mut comics: Vec<String> = fs::read_dir(&dir)
         .map_err(|e| format!("Cannot read directory: {e}"))?
         .filter_map(|entry| {
@@ -233,16 +233,32 @@ pub async fn get_mobi_page(path: String, page: usize) -> Result<MobiPage, String
     })
 }
 
+fn detect_archive_type(path: &Path) -> &'static str {
+    if let Ok(data) = fs::read(path) {
+        if data.len() >= 4 && data[0] == 0x50 && data[1] == 0x4B {
+            return "zip";
+        }
+        if data.len() >= 7 && &data[0..7] == b"Rar!\x1a\x07\x00" {
+            return "rar";
+        }
+        if data.len() >= 8 && &data[0..8] == b"Rar!\x1a\x07\x01\x00" {
+            return "rar";
+        }
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "cbz" | "zip" => "zip",
+        "cbr" | "rar" => "rar",
+        _ => "unknown",
+    }
+}
+
 fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, String> {
     use std::io::Read;
 
-    let ext = input_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let archive_type = detect_archive_type(input_path);
 
-    if ext == "cbz" || ext == "zip" {
+    if archive_type == "zip" {
         let data = fs::read(input_path).map_err(|e| format!("Cannot read: {e}"))?;
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&data))
             .map_err(|e| format!("Cannot open CBZ: {e}"))?;
@@ -278,7 +294,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
             }
         }
         Ok(count)
-    } else if ext == "cbr" || ext == "rar" {
+    } else if archive_type == "rar" {
         #[cfg(windows)]
         hide_console_window();
 
@@ -325,7 +341,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
         }
         Ok(count)
     } else {
-        Err(format!("Unsupported format: {ext}"))
+        Err(format!("Unsupported archive format: {archive_type}"))
     }
 }
 
@@ -362,6 +378,195 @@ fn find_unrar() -> Option<PathBuf> {
     None
 }
 
+fn render_pdf_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, String> {
+    #[cfg(windows)]
+    hide_console_window();
+
+    if let Some(mutool) = find_tool(&[
+        "/opt/homebrew/bin/mutool",
+        "/usr/local/bin/mutool",
+        "mutool",
+    ]) {
+        let pattern = dest_dir.join("page_%04d.png");
+        let status = std::process::Command::new(&mutool)
+            .args(["draw", "-o"])
+            .arg(&pattern)
+            .args(["-r", "150"])
+            .arg(input_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("Failed to run mutool: {e}"))?;
+        if status.success() {
+            return collect_rendered_images(dest_dir);
+        }
+    }
+
+    if let Some(pdftoppm) = find_tool(&[
+        "/opt/homebrew/bin/pdftoppm",
+        "/usr/local/bin/pdftoppm",
+        "pdftoppm",
+    ]) {
+        let prefix = dest_dir.join("page");
+        let status = std::process::Command::new(&pdftoppm)
+            .args(["-png", "-r", "150"])
+            .arg(input_path)
+            .arg(&prefix)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("Failed to run pdftoppm: {e}"))?;
+        if status.success() {
+            return collect_rendered_images(dest_dir);
+        }
+    }
+
+    Err("PDF renderer not found. Install mupdf-tools (brew install mupdf-tools) or poppler (brew install poppler)".to_string())
+}
+
+fn find_tool(candidates: &[&str]) -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for &name in candidates {
+                if let Some(basename) = Path::new(name).file_name() {
+                    let p = dir.join(basename);
+                    if p.exists() {
+                        return Some(p);
+                    }
+                    let p = dir.join("resources").join(basename);
+                    if p.exists() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+
+    for &name in candidates {
+        let p = PathBuf::from(name);
+        if p.exists() {
+            return Some(p);
+        }
+        if std::process::Command::new(name)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn collect_rendered_images(dir: &Path) -> Result<usize, String> {
+    let mut images: Vec<PathBuf> = fs::read_dir(dir)
+        .map_err(|e| format!("Cannot read dir: {e}"))?
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            let ext = path.extension()?.to_str()?.to_lowercase();
+            if ["png", "jpg", "jpeg", "ppm"].contains(&ext.as_str()) {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if images.is_empty() {
+        return Err("PDF rendering produced no images".to_string());
+    }
+
+    images.sort();
+    let count = images.len();
+    for (i, img_path) in images.iter().enumerate() {
+        let ext = img_path.extension().and_then(|e| e.to_str()).unwrap_or("png");
+        let new_path = dir.join(format!("{:04}.{ext}", i));
+        if *img_path != new_path {
+            let _ = fs::rename(img_path, &new_path);
+        }
+    }
+    Ok(count)
+}
+
+fn optimize_dir_to_cbz(
+    dir: &Path,
+    output_path: &Path,
+    width: u32,
+    height: u32,
+    quality: u8,
+    contrast: bool,
+    app: &AppHandle,
+) -> Result<(), String> {
+    use image::imageops::FilterType;
+    use image::ImageReader;
+    use std::io::{Cursor, Write};
+
+    let mut images: Vec<PathBuf> = fs::read_dir(dir)
+        .map_err(|e| format!("Cannot read directory: {e}"))?
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            let ext = path.extension()?.to_str()?.to_lowercase();
+            if ["jpg", "jpeg", "png", "webp", "ppm"].contains(&ext.as_str()) {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    images.sort();
+
+    if images.is_empty() {
+        return Err("No images found".to_string());
+    }
+
+    let total = images.len();
+    let out_file = fs::File::create(output_path).map_err(|e| format!("Cannot create output: {e}"))?;
+    let mut zip_writer = zip::ZipWriter::new(out_file);
+    let zip_options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    for (i, img_path) in images.iter().enumerate() {
+        emit_progress(app, i, total, &format!("Processing {}/{total}", i + 1));
+
+        let img = ImageReader::open(img_path)
+            .map_err(|e| format!("Cannot open image: {e}"))?
+            .with_guessed_format()
+            .map_err(|e| format!("Image format error: {e}"))?
+            .decode()
+            .map_err(|e| format!("Decode error: {e}"))?;
+
+        let img = img.resize(width, height, FilterType::Lanczos3);
+        let img = image::DynamicImage::ImageLuma8(img.to_luma8());
+        let img = if contrast {
+            image::DynamicImage::ImageLuma8(image::imageops::contrast(&img.to_luma8(), 20.0))
+        } else {
+            img
+        };
+
+        let out_name = format!("{:04}.jpg", i);
+        let mut jpeg_buf = Cursor::new(Vec::new());
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
+        img.write_with_encoder(encoder)
+            .map_err(|e| format!("JPEG encode error: {e}"))?;
+
+        zip_writer.start_file(&out_name, zip_options)
+            .map_err(|e| format!("ZIP write error: {e}"))?;
+        zip_writer.write_all(jpeg_buf.get_ref())
+            .map_err(|e| format!("ZIP write error: {e}"))?;
+    }
+
+    zip_writer.finish().map_err(|e| format!("ZIP finalize error: {e}"))?;
+    Ok(())
+}
+
+#[command]
+pub async fn get_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 fn optimize_cbz(
     input_path: &Path,
     output_path: &Path,
@@ -375,14 +580,14 @@ fn optimize_cbz(
     use image::ImageReader;
     use std::io::{Cursor, Read, Write};
 
-    let ext = input_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let archive_type = detect_archive_type(input_path);
     let data = fs::read(input_path).map_err(|e| format!("Cannot read input: {e}"))?;
 
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
 
-    if ext == "cbz" || ext == "zip" {
+    if archive_type == "zip" {
         let reader = zip::ZipArchive::new(Cursor::new(&data))
-            .map_err(|e| format!("Cannot open CBZ: {e}"))?;
+            .map_err(|e| format!("Cannot open archive: {e}"))?;
         let mut archive = reader;
         let mut names: Vec<String> = (0..archive.len())
             .filter_map(|i| {
@@ -404,12 +609,12 @@ fn optimize_cbz(
             file.read_to_end(&mut buf).map_err(|e| format!("Read error: {e}"))?;
             entries.push((name.clone(), buf));
         }
-    } else if ext == "cbr" || ext == "rar" {
+    } else if archive_type == "rar" {
         let tmp_dir = tempfile::TempDir::new()
             .map_err(|e| format!("Cannot create temp dir: {e}"))?;
         let count = extract_archive_to_dir(input_path, tmp_dir.path())?;
         if count == 0 {
-            return Err("No images found in CBR archive".to_string());
+            return Err("No images found in archive".to_string());
         }
         for i in 0..count {
             let img_path = tmp_dir.path().join(format!("{:04}.jpg", i));
@@ -418,7 +623,7 @@ fn optimize_cbz(
             }
         }
     } else {
-        return Err(format!("Unsupported format: {ext}"));
+        return Err(format!("Unsupported archive format: {archive_type}"));
     }
 
     if entries.is_empty() {
@@ -491,9 +696,24 @@ pub async fn convert_comic(
     emit_progress(&app, 0, 1, "Converting...");
     let start = std::time::Instant::now();
 
+    let ext = input_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let is_pdf = ext == "pdf";
+
     let output_path = if is_kobo(&options.device) {
         let cbz_path = output_dir.join(format!("{title}.cbz"));
-        optimize_cbz(&input_path, &cbz_path, dev_w, dev_h, options.quality, options.contrast, &app)?;
+        if is_pdf {
+            let tmp_dir = tempfile::TempDir::new()
+                .map_err(|e| format!("Cannot create temp dir: {e}"))?;
+            emit_progress(&app, 0, 1, "Rendering PDF...");
+            render_pdf_to_dir(&input_path, tmp_dir.path())?;
+            optimize_dir_to_cbz(tmp_dir.path(), &cbz_path, dev_w, dev_h, options.quality, options.contrast, &app)?;
+        } else {
+            optimize_cbz(&input_path, &cbz_path, dev_w, dev_h, options.quality, options.contrast, &app)?;
+        }
         cbz_path
     } else {
         use kindling::comic::{build_comic_with_options, ComicOptions as KindlingOptions, DeviceProfile};
@@ -520,10 +740,19 @@ pub async fn convert_comic(
         let tmp_dir = tempfile::TempDir::new()
             .map_err(|e| format!("Cannot create temp dir: {e}"))?;
 
-        emit_progress(&app, 0, 1, "Extracting archive...");
-        let img_count = extract_archive_to_dir(&input_path, tmp_dir.path())?;
+        if is_pdf {
+            emit_progress(&app, 0, 1, "Rendering PDF...");
+            render_pdf_to_dir(&input_path, tmp_dir.path())?;
+        } else {
+            emit_progress(&app, 0, 1, "Extracting archive...");
+            extract_archive_to_dir(&input_path, tmp_dir.path())?;
+        }
+
+        let img_count = fs::read_dir(tmp_dir.path())
+            .map(|rd| rd.filter_map(|e| e.ok()).count())
+            .unwrap_or(0);
         if img_count == 0 {
-            return Err("No images found in archive".to_string());
+            return Err("No images found".to_string());
         }
 
         #[cfg(unix)]

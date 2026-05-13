@@ -1,6 +1,6 @@
 mod converter;
 
-use converter::{convert_comic, get_mobi_info, get_mobi_page, list_comics};
+use converter::{convert_comic, get_mobi_info, get_mobi_page, get_version, list_comics};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -11,6 +11,7 @@ pub fn run() {
             get_mobi_page,
             convert_comic,
             list_comics,
+            get_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

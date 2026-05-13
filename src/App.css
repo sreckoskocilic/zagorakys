@@ -602,3 +602,11 @@ button:disabled {
   color: var(--text-mid);
   font-variant-numeric: tabular-nums;
 }
+
+.version-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
+  padding-top: 4px;
+}

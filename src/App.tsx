@@ -53,6 +53,7 @@ function App() {
   const [pageImage, setPageImage] = useState("");
   const [loadingPage, setLoadingPage] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const [version, setVersion] = useState("");
   const [theme, setTheme] = useState(() => {
     const saved = localStorage.getItem("zagorakys-theme");
     return ["ember", "jade", "iris", "rose"].includes(saved ?? "") ? saved! : "ember";
@@ -72,6 +73,10 @@ function App() {
   }, [device]);
 
   useEffect(() => {
+    invoke<string>("get_version").then(setVersion);
+  }, []);
+
+  useEffect(() => {
     const unlisten = listen<ConvertProgress>("convert-progress", (event) => {
       setProgress(event.payload);
     });
@@ -84,7 +89,7 @@ function App() {
     const selected = await open({
       multiple: false,
       filters: [
-        { name: "Comic Archives", extensions: ["cbr", "cbz", "rar", "zip"] },
+        { name: "Comic Archives", extensions: ["cbr", "cbz", "rar", "zip", "pdf"] },
       ],
     });
     if (selected) {
@@ -261,7 +266,7 @@ function App() {
   const convertLabel = () => {
     if (!converting) {
       if (isBatch) return `Convert ${batchFiles.length} Files`;
-      return "Convert to MOBI";
+      return device.startsWith("kobo") ? "Convert to CBZ" : "Convert to MOBI";
     }
     if (isBatch) return `Converting ${batchIndex + 1}/${batchFiles.length}...`;
     return "Converting...";
@@ -277,7 +282,7 @@ function App() {
       <div className="sidebar">
         <div className="sidebar-actions">
           <button className="sidebar-btn" onClick={selectComic} disabled={converting}>
-            Select Comic
+            Select File
           </button>
 
           <button className="sidebar-btn" onClick={selectFolder} disabled={converting}>
@@ -391,6 +396,8 @@ function App() {
                   <option value="rose">Rose</option>
                 </select>
               </div>
+
+              {version && <span className="version-label">Zagorakys v{version}</span>}
             </div>
           )}
           <button
@@ -458,7 +465,7 @@ function App() {
           </>
         ) : (
           <div className="preview-empty">
-            <p>Convert a comic or open a .mobi file</p>
+            <p>Select a file to convert</p>
           </div>
         )}
       </div>
