@@ -23,6 +23,7 @@ kindling = { git = "https://github.com/ciscoriordan/kindling", package = "kindli
 image = "0.25"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 libc = "0.2"
+walkdir = "2"
 
 [profile.dev]
 opt-level = 0

@@ -1,14 +1,18 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 interface ConvertResult {
   output_path: string;
   output_size: string;
   input_size: string;
+  input_bytes: number;
+  output_bytes: number;
   title: string;
   elapsed: string;
+  skipped: boolean;
 }
 
 interface ConvertProgress {
@@ -33,19 +37,27 @@ interface MobiPage {
 function App() {
   const [comicPath, setComicPath] = useState("");
   const [outputDir, setOutputDir] = useState("");
-  const [quality, setQuality] = useState(20);
-  const [contrast, setContrast] = useState(false);
+  const [quality, setQuality] = useState(() => {
+    const v = localStorage.getItem("zagorakys-quality");
+    return v ? Number(v) : 20;
+  });
+  const [contrast, setContrast] = useState(() => localStorage.getItem("zagorakys-contrast") === "true");
   const [converting, setConverting] = useState(false);
   const [progress, setProgress] = useState<ConvertProgress | null>(null);
   const [error, setError] = useState("");
   const [convertResult, setConvertResult] = useState<ConvertResult | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [noSplit, setNoSplit] = useState(false);
+  const [noSplit, setNoSplit] = useState(() => localStorage.getItem("zagorakys-nosplit") === "true");
   const [device, setDevice] = useState(() => localStorage.getItem("zagorakys-device") || "kindle4");
   const [batchFiles, setBatchFiles] = useState<string[]>([]);
   const [batchIndex, setBatchIndex] = useState(0);
   const [batchResults, setBatchResults] = useState<ConvertResult[]>([]);
+  const [batchErrors, setBatchErrors] = useState<string[]>([]);
   const [batchElapsed, setBatchElapsed] = useState("");
+  const [showBatchSummary, setShowBatchSummary] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [skipExisting, setSkipExisting] = useState(() => localStorage.getItem("zagorakys-skip") === "true");
+  const cancelRef = useRef(false);
 
   const [mobiPath, setMobiPath] = useState("");
   const [mobiInfo, setMobiInfo] = useState<MobiInfo | null>(null);
@@ -72,6 +84,11 @@ function App() {
     localStorage.setItem("zagorakys-device", device);
   }, [device]);
 
+  useEffect(() => { localStorage.setItem("zagorakys-quality", String(quality)); }, [quality]);
+  useEffect(() => { localStorage.setItem("zagorakys-contrast", String(contrast)); }, [contrast]);
+  useEffect(() => { localStorage.setItem("zagorakys-nosplit", String(noSplit)); }, [noSplit]);
+  useEffect(() => { localStorage.setItem("zagorakys-skip", String(skipExisting)); }, [skipExisting]);
+
   useEffect(() => {
     invoke<string>("get_version").then(setVersion);
   }, []);
@@ -85,6 +102,82 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const exts = ["cbr", "cbz", "rar", "zip", "pdf", "mobi"];
+    const getExt = (p: string) => {
+      const dot = p.lastIndexOf(".");
+      const sep = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+      return dot > sep ? p.slice(dot + 1).toLowerCase() : "";
+    };
+    const handleDrop = async (paths: string[]) => {
+      if (!paths || paths.length === 0) return;
+      if (paths.length === 1) {
+        const isDir = await invoke<boolean>("check_is_dir", { path: paths[0] });
+        if (isDir) {
+          try {
+            const comics = await invoke<string[]>("list_comics", { dir: paths[0] });
+            if (comics.length === 0) {
+              setError("No comic files found in folder");
+              return;
+            }
+            setComicPath("");
+            setConvertResult(null);
+            setBatchFiles(comics);
+            setBatchResults([]);
+            setBatchErrors([]);
+            setBatchIndex(0);
+            setShowBatchSummary(false);
+            setError("");
+            if (!outputDir) setOutputDir(paths[0]);
+          } catch (e) { setError(String(e)); }
+          return;
+        }
+      }
+      const file = paths[0];
+      const ext = getExt(file);
+      if (ext === "mobi") {
+        loadMobi(file);
+      } else if (exts.includes(ext)) {
+        if (paths.length > 1) {
+          const comics = paths.filter((p) => {
+            const e = getExt(p);
+            return exts.includes(e) && e !== "mobi";
+          });
+          if (comics.length === 0) return;
+          setComicPath("");
+          setConvertResult(null);
+          setBatchFiles(comics.sort());
+          setBatchResults([]);
+          setBatchErrors([]);
+          setBatchIndex(0);
+          setShowBatchSummary(false);
+          setError("");
+        } else {
+          setComicPath(file);
+          setBatchFiles([]);
+          setConvertResult(null);
+          setBatchResults([]);
+          setBatchErrors([]);
+          setShowBatchSummary(false);
+          setError("");
+          const dir = file.replace(/[/\\][^/\\]+$/, "") || file;
+          if (!outputDir) setOutputDir(dir);
+        }
+      }
+    };
+    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
+      if (event.payload.type === "enter") {
+        setDragging(true);
+      } else if (event.payload.type === "leave") {
+        setDragging(false);
+      } else if (event.payload.type === "drop") {
+        setDragging(false);
+        handleDrop(event.payload.paths);
+      }
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, [outputDir]);
+
   const selectComic = async () => {
     const selected = await open({
       multiple: false,
@@ -97,8 +190,10 @@ function App() {
       setBatchFiles([]);
       setConvertResult(null);
       setBatchResults([]);
+      setBatchErrors([]);
+      setShowBatchSummary(false);
       setError("");
-      const dir = (selected as string).replace(/[/\\][^/\\]+$/, "");
+      const dir = (selected as string).replace(/[/\\][^/\\]+$/, "") || (selected as string);
       if (!outputDir) setOutputDir(dir);
     }
   };
@@ -110,7 +205,7 @@ function App() {
 
   const convert = async () => {
     if (!comicPath) return;
-    const dir = outputDir || comicPath.replace(/[/\\][^/\\]+$/, "");
+    const dir = outputDir || comicPath.replace(/[/\\][^/\\]+$/, "") || comicPath;
     setConverting(true);
     setError("");
     setConvertResult(null);
@@ -127,7 +222,7 @@ function App() {
         },
       });
       setConvertResult(result);
-      if (result.output_path.endsWith(".mobi")) {
+      if (result.output_path.endsWith(".mobi") || result.output_path.endsWith(".cbz")) {
         loadMobi(result.output_path);
       }
     } catch (e) {
@@ -149,21 +244,28 @@ function App() {
     setConvertResult(null);
     setBatchFiles(comics);
     setBatchResults([]);
+    setBatchErrors([]);
     setBatchIndex(0);
+    setShowBatchSummary(false);
     setError("");
     if (!outputDir) setOutputDir(selected as string);
   };
 
   const batchConvert = async () => {
     if (batchFiles.length === 0) return;
-    const dir = outputDir || batchFiles[0].replace(/[/\\][^/\\]+$/, "");
+    const dir = outputDir || batchFiles[0].replace(/[/\\][^/\\]+$/, "") || batchFiles[0];
     setConverting(true);
+    cancelRef.current = false;
     setError("");
     setBatchResults([]);
+    setBatchErrors([]);
     setBatchElapsed("");
+    setShowBatchSummary(false);
     const start = Date.now();
     const results: ConvertResult[] = [];
+    const errors: string[] = [];
     for (let i = 0; i < batchFiles.length; i++) {
+      if (cancelRef.current) break;
       setBatchIndex(i);
       setProgress({ current: i, total: batchFiles.length, message: `${fileName(batchFiles[i])} (${i + 1}/${batchFiles.length})` });
       try {
@@ -175,30 +277,37 @@ function App() {
             contrast,
             no_split: noSplit,
             device,
+            skip_existing: skipExisting,
           },
         });
         results.push(result);
         setBatchResults([...results]);
       } catch (e) {
-        setError(`${fileName(batchFiles[i])}: ${e}`);
+        errors.push(fileName(batchFiles[i]));
+        setBatchErrors([...errors]);
       }
     }
     const secs = (Date.now() - start) / 1000;
     setBatchElapsed(secs >= 60 ? `${Math.floor(secs / 60)}m ${(secs % 60).toFixed(1)}s` : `${secs.toFixed(1)}s`);
     setConverting(false);
     setProgress(null);
+    if (results.length > 0 || errors.length > 0) {
+      setShowBatchSummary(true);
+    }
     if (results.length > 0) {
       const last = results[results.length - 1];
-      if (last.output_path.endsWith(".mobi")) {
+      if (!last.skipped && (last.output_path.endsWith(".mobi") || last.output_path.endsWith(".cbz"))) {
         loadMobi(last.output_path);
       }
     }
   };
 
+  const cancelBatch = () => { cancelRef.current = true; };
+
   const openMobi = async () => {
     const selected = await open({
       multiple: false,
-      filters: [{ name: "MOBI files", extensions: ["mobi"] }],
+      filters: [{ name: "Books", extensions: ["mobi", "cbz"] }],
     });
     if (selected) loadMobi(selected as string);
   };
@@ -250,10 +359,13 @@ function App() {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "ArrowLeft") prevPage();
       if (e.key === "ArrowRight") nextPage();
+      if ((e.key === "=" || e.key === "+") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); zoomIn(); }
+      if (e.key === "-" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); zoomOut(); }
+      if (e.key === "0" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); setZoom(1); }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  });
+  }, [currentPage, mobiPath, mobiInfo, zoom]);
 
   const isBatch = batchFiles.length > 0;
   const hasInput = comicPath || isBatch;
@@ -289,6 +401,23 @@ function App() {
             Select Folder
           </button>
 
+          {comicPath && !isBatch && (
+            <div className="selected-file" title={comicPath}>{fileName(comicPath)}</div>
+          )}
+
+          {isBatch && !converting && !showBatchSummary && (
+            <div className="batch-file-preview">
+              <span className="batch-preview-label">{batchFiles.length} files</span>
+              <div className="batch-file-list">
+                {batchFiles.map((f, i) => (
+                  <div key={i} className="batch-file-item">
+                    <span className="batch-file-name" title={f}>{fileName(f)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <button
             className="sidebar-btn primary"
             onClick={handleConvert}
@@ -296,6 +425,12 @@ function App() {
           >
             {convertLabel()}
           </button>
+
+          {converting && isBatch && (
+            <button className="sidebar-btn cancel-btn" onClick={cancelBatch}>
+              Cancel
+            </button>
+          )}
 
           {converting && isBatch && (
             <div className="progress-section">
@@ -321,10 +456,67 @@ function App() {
             </div>
           )}
 
+          {showBatchSummary && !converting && (() => {
+            const converted = batchResults.filter(r => !r.skipped);
+            const skipped = batchResults.filter(r => r.skipped);
+            return (
+            <div className="batch-summary">
+              <div className="batch-summary-header">
+                <span className="batch-summary-title">Batch Complete</span>
+                <button className="batch-summary-close" onClick={() => setShowBatchSummary(false)}>&times;</button>
+              </div>
+              <div className="batch-summary-stats">
+                <div className="batch-stat">
+                  <span className="batch-stat-value">{converted.length}</span>
+                  <span className="batch-stat-label">converted</span>
+                </div>
+                {skipped.length > 0 && (
+                  <div className="batch-stat batch-stat-skip">
+                    <span className="batch-stat-value">{skipped.length}</span>
+                    <span className="batch-stat-label">skipped</span>
+                  </div>
+                )}
+                {batchErrors.length > 0 && (
+                  <div className="batch-stat batch-stat-error">
+                    <span className="batch-stat-value">{batchErrors.length}</span>
+                    <span className="batch-stat-label">failed</span>
+                  </div>
+                )}
+                <div className="batch-stat">
+                  <span className="batch-stat-value">{batchElapsed}</span>
+                  <span className="batch-stat-label">elapsed</span>
+                </div>
+              </div>
+              {converted.length > 0 && (
+                <div className="batch-summary-sizes">
+                  {formatBytes(converted.reduce((s, r) => s + r.input_bytes, 0))}
+                  {" → "}
+                  {formatBytes(converted.reduce((s, r) => s + r.output_bytes, 0))}
+                </div>
+              )}
+              <div className="batch-file-list">
+                {batchResults.map((r, i) => (
+                  <div key={i} className={`batch-file-item ${r.skipped ? "batch-file-skip" : "batch-file-ok"}`}>
+                    <span className="batch-file-icon">{r.skipped ? "–" : "✓"}</span>
+                    <span className="batch-file-name" title={fileName(r.output_path)}>{r.title || fileName(r.output_path)}</span>
+                    <span className="batch-file-size">{r.skipped ? "exists" : r.output_size}</span>
+                  </div>
+                ))}
+                {batchErrors.map((name, i) => (
+                  <div key={`err-${i}`} className="batch-file-item batch-file-fail">
+                    <span className="batch-file-icon">&#10007;</span>
+                    <span className="batch-file-name" title={name}>{name}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            );
+          })()}
+
           <div className="divider" />
 
           <button className="sidebar-btn" onClick={openMobi}>
-            Open MOBI
+            Open Book
           </button>
         </div>
 
@@ -369,6 +561,15 @@ function App() {
                   onChange={(e) => setNoSplit(e.target.checked)}
                 />
                 Don't split double pages
+              </label>
+
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={skipExisting}
+                  onChange={(e) => setSkipExisting(e.target.checked)}
+                />
+                Skip already converted
               </label>
 
               <div className="setting-row">
@@ -432,11 +633,8 @@ function App() {
               <span className="zoom-label">{Math.round(zoom * 100)}%</span>
               <button onClick={zoomIn} disabled={zoom >= 3}>+</button>
             </div>
-            <div
-              className="preview-image-container"
-              style={zoom > 1 ? { overflow: 'auto', alignItems: 'flex-start', justifyContent: 'flex-start' } : undefined}
-            >
-              <div className="kindle-frame">
+            <div className={`preview-image-container${zoom > 1 ? " zoomed" : ""}`}>
+              <div className="kindle-frame" style={zoom !== 1 ? { transform: `scale(${zoom})`, transformOrigin: zoom > 1 ? '0 0' : 'center center' } : undefined}>
                 <div className="kindle-bezel">
                   <span className="kindle-label">Kindle</span>
                   <div className="kindle-screen">
@@ -444,11 +642,6 @@ function App() {
                       src={pageImage}
                       alt={`Page ${currentPage + 1}`}
                       className={loadingPage ? "loading" : ""}
-                      style={zoom !== 1 ? {
-                        maxWidth: 'none',
-                        maxHeight: 'none',
-                        width: `${zoom * 100}%`,
-                      } : undefined}
                     />
                   </div>
                 </div>
@@ -465,7 +658,13 @@ function App() {
           </>
         ) : (
           <div className="preview-empty">
-            <p>Select a file to convert</p>
+            <p>Drop files here or select from sidebar</p>
+            <span className="preview-empty-hint">CBR, CBZ, RAR, ZIP, PDF</span>
+          </div>
+        )}
+        {dragging && (
+          <div className="drag-overlay">
+            <div className="drag-overlay-content">Drop to convert</div>
           </div>
         )}
       </div>
@@ -475,6 +674,13 @@ function App() {
 
 function fileName(path: string): string {
   return path.split(/[/\\]/).pop() || path;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 
 export default App;

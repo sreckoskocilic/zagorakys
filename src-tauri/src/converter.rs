@@ -1,8 +1,14 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tauri::{command, AppHandle, Emitter};
+use walkdir::WalkDir;
+
+pub struct MobiCache(pub Mutex<HashMap<PathBuf, Vec<Vec<u8>>>>);
 
 fn device_profile(device: &str) -> (u32, u32, &'static str) {
     match device {
@@ -25,6 +31,8 @@ pub struct ConvertOptions {
     pub contrast: bool,
     pub no_split: bool,
     pub device: String,
+    #[serde(default)]
+    pub skip_existing: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -39,8 +47,11 @@ pub struct ConvertResult {
     pub output_path: String,
     pub output_size: String,
     pub input_size: String,
+    pub input_bytes: usize,
+    pub output_bytes: usize,
     pub title: String,
     pub elapsed: String,
+    pub skipped: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,17 +70,25 @@ pub struct MobiPage {
 }
 
 #[command]
+pub async fn check_is_dir(path: String) -> bool {
+    PathBuf::from(&path).is_dir()
+}
+
+#[command]
 pub async fn list_comics(dir: String) -> Result<Vec<String>, String> {
     let dir = PathBuf::from(&dir);
     if !dir.is_dir() {
         return Err("Not a directory".to_string());
     }
     let exts = ["cbr", "cbz", "rar", "zip", "pdf"];
-    let mut comics: Vec<String> = fs::read_dir(&dir)
-        .map_err(|e| format!("Cannot read directory: {e}"))?
+    let mut comics: Vec<String> = WalkDir::new(&dir)
+        .into_iter()
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
+            if !path.is_file() {
+                return None;
+            }
             let ext = path.extension()?.to_str()?.to_lowercase();
             if exts.contains(&ext.as_str()) {
                 Some(path.to_string_lossy().to_string())
@@ -131,7 +150,7 @@ fn extract_mobi_metadata(data: &[u8]) -> (String, String) {
                 if pos + 8 > rec.len() { break; }
                 let rec_type = u32::from_be_bytes([rec[pos], rec[pos+1], rec[pos+2], rec[pos+3]]);
                 let rec_len = u32::from_be_bytes([rec[pos+4], rec[pos+5], rec[pos+6], rec[pos+7]]) as usize;
-                if rec_len < 8 || pos + rec_len > data.len() { break; }
+                if rec_len < 8 || pos + rec_len > rec.len() { break; }
                 if rec_type == 100 {
                     author = std::str::from_utf8(&rec[pos+8..pos+rec_len])
                         .unwrap_or("")
@@ -184,10 +203,11 @@ fn extract_images_from_mobi(path: &Path) -> Result<Vec<Vec<u8>>, String> {
 
         let record = &data[offset..end];
 
-        if record.len() > 3 && record[0] == 0xFF && record[1] == 0xD8 && record[2] == 0xFF {
-            images.push(record.to_vec());
-        }
-        if record.len() > 4 && record[0..4] == [0x89, 0x50, 0x4E, 0x47] {
+        let is_image = (record.len() > 3 && record[0] == 0xFF && record[1] == 0xD8 && record[2] == 0xFF)
+            || (record.len() > 4 && record[0..4] == [0x89, 0x50, 0x4E, 0x47])
+            || (record.len() > 6 && &record[0..3] == b"GIF")
+            || (record.len() > 2 && record[0] == 0x42 && record[1] == 0x4D);
+        if is_image {
             images.push(record.to_vec());
         }
     }
@@ -195,13 +215,77 @@ fn extract_images_from_mobi(path: &Path) -> Result<Vec<Vec<u8>>, String> {
     Ok(images)
 }
 
+fn extract_images_from_cbz(path: &Path) -> Result<Vec<Vec<u8>>, String> {
+    let data = fs::read(path).map_err(|e| format!("Cannot read CBZ: {e}"))?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&data))
+        .map_err(|e| format!("Cannot open CBZ: {e}"))?;
+
+    let mut names: Vec<String> = (0..archive.len())
+        .filter_map(|i| {
+            let file = archive.by_index(i).ok()?;
+            let name = file.name().to_string();
+            let lower = name.to_lowercase();
+            if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".webp") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    names.sort();
+
+    let mut images = Vec::new();
+    for name in &names {
+        if let Ok(mut file) = archive.by_name(name) {
+            let mut buf = Vec::new();
+            if file.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+                images.push(buf);
+            }
+        }
+    }
+    Ok(images)
+}
+
+fn get_or_extract(cache: &MobiCache, path: &Path) -> Result<Vec<Vec<u8>>, String> {
+    {
+        let map = cache.0.lock().unwrap();
+        if let Some(imgs) = map.get(path) {
+            return Ok(imgs.clone());
+        }
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let images = if ext == "cbz" || ext == "zip" {
+        extract_images_from_cbz(path)?
+    } else {
+        extract_images_from_mobi(path)?
+    };
+    let mut map = cache.0.lock().unwrap();
+    if map.len() >= 3 {
+        map.clear();
+    }
+    map.insert(path.to_path_buf(), images.clone());
+    Ok(images)
+}
+
 #[command]
-pub async fn get_mobi_info(path: String) -> Result<MobiInfo, String> {
+pub async fn get_mobi_info(
+    path: String,
+    cache: tauri::State<'_, MobiCache>,
+) -> Result<MobiInfo, String> {
     let path = PathBuf::from(&path);
-    let data = fs::read(&path).map_err(|e| format!("Cannot read MOBI: {e}"))?;
-    let (title, author) = extract_mobi_metadata(&data);
-    let images = extract_images_from_mobi(&path)?;
-    let file_size = format_size(data.len());
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+
+    let (title, author, file_size) = if ext == "cbz" || ext == "zip" {
+        let meta = fs::metadata(&path).map_err(|e| format!("Cannot read: {e}"))?;
+        let title = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        (title, String::new(), format_size(meta.len() as usize))
+    } else {
+        let data = fs::read(&path).map_err(|e| format!("Cannot read MOBI: {e}"))?;
+        let (title, author) = extract_mobi_metadata(&data);
+        (title, author, format_size(data.len()))
+    };
+
+    let images = get_or_extract(&cache, &path)?;
 
     Ok(MobiInfo {
         page_count: images.len(),
@@ -212,18 +296,28 @@ pub async fn get_mobi_info(path: String) -> Result<MobiInfo, String> {
 }
 
 #[command]
-pub async fn get_mobi_page(path: String, page: usize) -> Result<MobiPage, String> {
+pub async fn get_mobi_page(
+    path: String,
+    page: usize,
+    cache: tauri::State<'_, MobiCache>,
+) -> Result<MobiPage, String> {
     let path = PathBuf::from(&path);
-    let images = extract_images_from_mobi(&path)?;
+    let images = get_or_extract(&cache, &path)?;
 
     if images.is_empty() {
         return Err("No images found in MOBI".to_string());
     }
 
     let idx = page.min(images.len() - 1);
+    let mime = match image_ext_from_bytes(&images[idx]) {
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        _ => "image/jpeg",
+    };
     let b64 = {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&images[idx]);
-        format!("data:image/jpeg;base64,{encoded}")
+        format!("data:{mime};base64,{encoded}")
     };
 
     Ok(MobiPage {
@@ -234,14 +328,16 @@ pub async fn get_mobi_page(path: String, page: usize) -> Result<MobiPage, String
 }
 
 fn detect_archive_type(path: &Path) -> &'static str {
-    if let Ok(data) = fs::read(path) {
-        if data.len() >= 4 && data[0] == 0x50 && data[1] == 0x4B {
+    if let Ok(mut f) = fs::File::open(path) {
+        let mut buf = [0u8; 8];
+        let n = f.read(&mut buf).unwrap_or(0);
+        if n >= 4 && buf[0] == 0x50 && buf[1] == 0x4B {
             return "zip";
         }
-        if data.len() >= 7 && &data[0..7] == b"Rar!\x1a\x07\x00" {
+        if n >= 7 && &buf[0..7] == b"Rar!\x1a\x07\x00" {
             return "rar";
         }
-        if data.len() >= 8 && &data[0..8] == b"Rar!\x1a\x07\x01\x00" {
+        if n >= 8 && &buf[0..8] == b"Rar!\x1a\x07\x01\x00" {
             return "rar";
         }
     }
@@ -286,7 +382,8 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
             if let Ok(mut file) = archive.by_name(name) {
                 let mut buf = Vec::new();
                 if file.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
-                    let out_name = format!("{:04}.jpg", count);
+                    let ext = image_ext_from_bytes(&buf);
+                    let out_name = format!("{:04}.{ext}", count);
                     if fs::write(dest_dir.join(&out_name), &buf).is_ok() {
                         count += 1;
                     }
@@ -333,7 +430,8 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
 
         let count = images.len();
         for (i, img_path) in images.iter().enumerate() {
-            let new_name = format!("{:04}.jpg", i);
+            let ext = img_path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+            let new_name = format!("{:04}.{ext}", i);
             let new_path = dest_dir.join(&new_name);
             if *img_path != new_path {
                 let _ = fs::rename(img_path, &new_path);
@@ -616,10 +714,23 @@ fn optimize_cbz(
         if count == 0 {
             return Err("No images found in archive".to_string());
         }
-        for i in 0..count {
-            let img_path = tmp_dir.path().join(format!("{:04}.jpg", i));
-            if let Ok(data) = fs::read(&img_path) {
-                entries.push((format!("{:04}.jpg", i), data));
+        let mut imgs: Vec<PathBuf> = fs::read_dir(tmp_dir.path())
+            .map_err(|e| format!("Cannot read temp dir: {e}"))?
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                let ext = path.extension()?.to_str()?.to_lowercase();
+                if ["jpg", "jpeg", "png", "webp"].contains(&ext.as_str()) {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        imgs.sort();
+        for img_path in &imgs {
+            if let Ok(data) = fs::read(img_path) {
+                let name = img_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                entries.push((name, data));
             }
         }
     } else {
@@ -677,7 +788,8 @@ pub async fn convert_comic(
     options: ConvertOptions,
 ) -> Result<ConvertResult, String> {
     let input_path = PathBuf::from(&options.input_path);
-    let output_dir = PathBuf::from(&options.output_dir);
+    let output_dir = fs::canonicalize(&options.output_dir)
+        .unwrap_or_else(|_| PathBuf::from(&options.output_dir));
 
     let title = input_path
         .file_stem()
@@ -689,9 +801,26 @@ pub async fn convert_comic(
 
     let (dev_w, dev_h, dev_name) = device_profile(&options.device);
 
-    let input_size = fs::metadata(&input_path)
-        .map(|m| format_size(m.len() as usize))
-        .unwrap_or_default();
+    let output_ext = if is_kobo(&options.device) { "cbz" } else { "mobi" };
+    let expected_output = output_dir.join(format!("{title}.{output_ext}"));
+
+    if options.skip_existing && expected_output.exists() {
+        let output_bytes = fs::metadata(&expected_output).map(|m| m.len() as usize).unwrap_or(0);
+        let input_bytes = fs::metadata(&input_path).map(|m| m.len() as usize).unwrap_or(0);
+        return Ok(ConvertResult {
+            output_path: expected_output.to_string_lossy().to_string(),
+            output_size: format_size(output_bytes),
+            input_size: format_size(input_bytes),
+            input_bytes,
+            output_bytes,
+            title,
+            elapsed: "0.0s".to_string(),
+            skipped: true,
+        });
+    }
+
+    let input_bytes = fs::metadata(&input_path).map(|m| m.len() as usize).unwrap_or(0);
+    let input_size = format_size(input_bytes);
 
     emit_progress(&app, 0, 1, "Converting...");
     let start = std::time::Instant::now();
@@ -756,33 +885,18 @@ pub async fn convert_comic(
         }
 
         #[cfg(unix)]
-        let _gag = {
-            use std::os::unix::io::AsRawFd;
-            let devnull = fs::File::open("/dev/null").ok();
-            devnull.map(|f| {
-                let old = unsafe { libc::dup(2) };
-                unsafe { libc::dup2(f.as_raw_fd(), 2) };
-                old
-            })
-        };
+        let _gag = StderrGuard::new();
 
         build_comic_with_options(tmp_dir.path(), &mobi_path, &profile, &kindle_options)
             .map_err(|e| format!("Kindling error: {e}"))?;
 
-        #[cfg(unix)]
-        if let Some(old) = _gag {
-            unsafe {
-                libc::dup2(old, 2);
-                libc::close(old);
-            }
-        }
+        drop(_gag);
 
         mobi_path
     };
 
-    let output_size = fs::metadata(&output_path)
-        .map(|m| format_size(m.len() as usize))
-        .unwrap_or_default();
+    let output_bytes = fs::metadata(&output_path).map(|m| m.len() as usize).unwrap_or(0);
+    let output_size = format_size(output_bytes);
 
     let duration = start.elapsed();
     let elapsed = if duration.as_secs() >= 60 {
@@ -797,8 +911,11 @@ pub async fn convert_comic(
         output_path: output_path.to_string_lossy().to_string(),
         output_size,
         input_size,
+        input_bytes,
+        output_bytes,
         title,
         elapsed,
+        skipped: false,
     })
 }
 
@@ -822,6 +939,47 @@ mod winapi {
         pub fn AllocConsole() -> i32;
         pub fn GetConsoleWindow() -> *mut std::ffi::c_void;
         pub fn ShowWindow(hwnd: *mut std::ffi::c_void, cmd: i32) -> i32;
+    }
+}
+
+fn image_ext_from_bytes(data: &[u8]) -> &'static str {
+    if data.len() >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+        "jpg"
+    } else if data.len() >= 4 && data[0..4] == [0x89, 0x50, 0x4E, 0x47] {
+        "png"
+    } else if data.len() >= 3 && &data[0..3] == b"GIF" {
+        "gif"
+    } else if data.len() >= 2 && data[0] == 0x42 && data[1] == 0x4D {
+        "bmp"
+    } else {
+        "jpg"
+    }
+}
+
+#[cfg(unix)]
+struct StderrGuard {
+    old_fd: i32,
+}
+
+#[cfg(unix)]
+impl StderrGuard {
+    fn new() -> Option<Self> {
+        use std::os::unix::io::AsRawFd;
+        let devnull = fs::File::open("/dev/null").ok()?;
+        let old_fd = unsafe { libc::dup(2) };
+        if old_fd < 0 { return None; }
+        unsafe { libc::dup2(devnull.as_raw_fd(), 2) };
+        Some(Self { old_fd })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StderrGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::dup2(self.old_fd, 2);
+            libc::close(self.old_fd);
+        }
     }
 }
 
