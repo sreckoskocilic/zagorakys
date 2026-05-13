@@ -302,7 +302,10 @@ function App() {
     }
   };
 
-  const cancelBatch = () => { cancelRef.current = true; };
+  const cancelConvert = async () => {
+    cancelRef.current = true;
+    await invoke("cancel_convert");
+  };
 
   const openMobi = async () => {
     const selected = await open({
@@ -377,7 +380,8 @@ function App() {
 
   const convertLabel = () => {
     if (!converting) {
-      if (isBatch) return `Convert ${batchFiles.length} Files`;
+      if (isBatch) return `${device === "optimize" ? "Optimize" : "Convert"} ${batchFiles.length} Files`;
+      if (device === "optimize") return "Optimize CBZ";
       return device.startsWith("kobo") ? "Convert to CBZ" : "Convert to MOBI";
     }
     if (isBatch) return `Converting ${batchIndex + 1}/${batchFiles.length}...`;
@@ -426,8 +430,8 @@ function App() {
             {convertLabel()}
           </button>
 
-          {converting && isBatch && (
-            <button className="sidebar-btn cancel-btn" onClick={cancelBatch}>
+          {converting && (
+            <button className="sidebar-btn cancel-btn" onClick={cancelConvert}>
               Cancel
             </button>
           )}
@@ -554,6 +558,7 @@ function App() {
                 Enhance contrast
               </label>
 
+              {!device.startsWith("kobo") && device !== "optimize" && (
               <label className="checkbox-label">
                 <input
                   type="checkbox"
@@ -562,6 +567,7 @@ function App() {
                 />
                 Don't split double pages
               </label>
+              )}
 
               <label className="checkbox-label">
                 <input
@@ -582,6 +588,7 @@ function App() {
                   <option value="kindle-paperwhite">Kindle Paperwhite (1072×1448)</option>
                   <option value="kindle-oasis">Kindle Oasis (1264×1680)</option>
                   <option value="kobo-clara-hd">Kobo Clara HD (1072×1448)</option>
+                  <option value="optimize">Optimize (reduce size)</option>
                 </select>
               </div>
 

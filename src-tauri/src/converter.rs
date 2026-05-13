@@ -4,24 +4,28 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{command, AppHandle, Emitter};
 use walkdir::WalkDir;
 
 pub struct MobiCache(pub Mutex<HashMap<PathBuf, Vec<Vec<u8>>>>);
+pub struct ConvertCancel(pub AtomicBool);
 
 fn device_profile(device: &str) -> (u32, u32, &'static str) {
     match device {
         "kobo-clara-hd" => (1072, 1448, "kobo_clara_hd"),
         "kindle-paperwhite" => (1072, 1448, "kindle_pw"),
         "kindle-oasis" => (1264, 1680, "kindle_oasis"),
+        "optimize" => (9999, 9999, "optimized"),
         _ => (600, 800, "kindle4"),
     }
 }
 
-fn is_kobo(device: &str) -> bool {
-    device.starts_with("kobo")
+fn is_cbz_output(device: &str) -> bool {
+    device.starts_with("kobo") || device == "optimize"
 }
+
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConvertOptions {
@@ -167,7 +171,10 @@ fn extract_mobi_metadata(data: &[u8]) -> (String, String) {
 
 fn extract_images_from_mobi(path: &Path) -> Result<Vec<Vec<u8>>, String> {
     let data = fs::read(path).map_err(|e| format!("Cannot read MOBI: {e}"))?;
+    extract_images_from_mobi_data(&data)
+}
 
+fn extract_images_from_mobi_data(data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     if data.len() < 78 {
         return Err("File too small to be MOBI".to_string());
     }
@@ -205,7 +212,7 @@ fn extract_images_from_mobi(path: &Path) -> Result<Vec<Vec<u8>>, String> {
 
         let is_image = (record.len() > 3 && record[0] == 0xFF && record[1] == 0xD8 && record[2] == 0xFF)
             || (record.len() > 4 && record[0..4] == [0x89, 0x50, 0x4E, 0x47])
-            || (record.len() > 6 && &record[0..3] == b"GIF")
+            || (record.len() >= 6 && (&record[0..6] == b"GIF87a" || &record[0..6] == b"GIF89a"))
             || (record.len() > 2 && record[0] == 0x42 && record[1] == 0x4D);
         if is_image {
             images.push(record.to_vec());
@@ -246,7 +253,7 @@ fn extract_images_from_cbz(path: &Path) -> Result<Vec<Vec<u8>>, String> {
     Ok(images)
 }
 
-fn get_or_extract(cache: &MobiCache, path: &Path) -> Result<Vec<Vec<u8>>, String> {
+fn get_or_extract(cache: &MobiCache, path: &Path, preloaded: Option<&[u8]>) -> Result<Vec<Vec<u8>>, String> {
     {
         let map = cache.0.lock().unwrap();
         if let Some(imgs) = map.get(path) {
@@ -256,6 +263,8 @@ fn get_or_extract(cache: &MobiCache, path: &Path) -> Result<Vec<Vec<u8>>, String
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     let images = if ext == "cbz" || ext == "zip" {
         extract_images_from_cbz(path)?
+    } else if let Some(data) = preloaded {
+        extract_images_from_mobi_data(data)?
     } else {
         extract_images_from_mobi(path)?
     };
@@ -275,24 +284,28 @@ pub async fn get_mobi_info(
     let path = PathBuf::from(&path);
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
 
-    let (title, author, file_size) = if ext == "cbz" || ext == "zip" {
+    if ext == "cbz" || ext == "zip" {
         let meta = fs::metadata(&path).map_err(|e| format!("Cannot read: {e}"))?;
         let title = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-        (title, String::new(), format_size(meta.len() as usize))
+        let images = get_or_extract(&cache, &path, None)?;
+        Ok(MobiInfo {
+            page_count: images.len(),
+            file_size: format_size(meta.len() as usize),
+            title,
+            author: String::new(),
+        })
     } else {
         let data = fs::read(&path).map_err(|e| format!("Cannot read MOBI: {e}"))?;
         let (title, author) = extract_mobi_metadata(&data);
-        (title, author, format_size(data.len()))
-    };
-
-    let images = get_or_extract(&cache, &path)?;
-
-    Ok(MobiInfo {
-        page_count: images.len(),
-        file_size,
-        title,
-        author,
-    })
+        let file_size = format_size(data.len());
+        let images = get_or_extract(&cache, &path, Some(&data))?;
+        Ok(MobiInfo {
+            page_count: images.len(),
+            file_size,
+            title,
+            author,
+        })
+    }
 }
 
 #[command]
@@ -302,10 +315,10 @@ pub async fn get_mobi_page(
     cache: tauri::State<'_, MobiCache>,
 ) -> Result<MobiPage, String> {
     let path = PathBuf::from(&path);
-    let images = get_or_extract(&cache, &path)?;
+    let images = get_or_extract(&cache, &path, None)?;
 
     if images.is_empty() {
-        return Err("No images found in MOBI".to_string());
+        return Err("No images found".to_string());
     }
 
     let idx = page.min(images.len() - 1);
@@ -596,6 +609,8 @@ fn optimize_dir_to_cbz(
     height: u32,
     quality: u8,
     contrast: bool,
+    grayscale: bool,
+    cancel: &AtomicBool,
     app: &AppHandle,
 ) -> Result<(), String> {
     use image::imageops::FilterType;
@@ -627,6 +642,11 @@ fn optimize_dir_to_cbz(
         .compression_method(zip::CompressionMethod::Deflated);
 
     for (i, img_path) in images.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            drop(zip_writer);
+            let _ = fs::remove_file(output_path);
+            return Err("Cancelled".to_string());
+        }
         emit_progress(app, i, total, &format!("Processing {}/{total}", i + 1));
 
         let img = ImageReader::open(img_path)
@@ -636,8 +656,12 @@ fn optimize_dir_to_cbz(
             .decode()
             .map_err(|e| format!("Decode error: {e}"))?;
 
-        let img = img.resize(width, height, FilterType::Lanczos3);
-        let img = image::DynamicImage::ImageLuma8(img.to_luma8());
+        let img = if width < 9999 { img.resize(width, height, FilterType::Lanczos3) } else { img };
+        let img = if grayscale {
+            image::DynamicImage::ImageLuma8(img.to_luma8())
+        } else {
+            img
+        };
         let img = if contrast {
             image::DynamicImage::ImageLuma8(image::imageops::contrast(&img.to_luma8(), 20.0))
         } else {
@@ -665,6 +689,12 @@ pub async fn get_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+#[command]
+pub async fn cancel_convert(cancel: tauri::State<'_, ConvertCancel>) -> Result<(), String> {
+    cancel.0.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
 fn optimize_cbz(
     input_path: &Path,
     output_path: &Path,
@@ -672,6 +702,8 @@ fn optimize_cbz(
     height: u32,
     quality: u8,
     contrast: bool,
+    grayscale: bool,
+    cancel: &AtomicBool,
     app: &AppHandle,
 ) -> Result<(), String> {
     use image::imageops::FilterType;
@@ -679,11 +711,11 @@ fn optimize_cbz(
     use std::io::{Cursor, Read, Write};
 
     let archive_type = detect_archive_type(input_path);
-    let data = fs::read(input_path).map_err(|e| format!("Cannot read input: {e}"))?;
 
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
 
     if archive_type == "zip" {
+        let data = fs::read(input_path).map_err(|e| format!("Cannot read input: {e}"))?;
         let reader = zip::ZipArchive::new(Cursor::new(&data))
             .map_err(|e| format!("Cannot open archive: {e}"))?;
         let mut archive = reader;
@@ -748,6 +780,11 @@ fn optimize_cbz(
         .compression_method(zip::CompressionMethod::Deflated);
 
     for (i, (name, raw)) in entries.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            drop(zip_writer);
+            let _ = fs::remove_file(output_path);
+            return Err("Cancelled".to_string());
+        }
         emit_progress(app, i, total, &format!("Processing {}/{total}", i + 1));
 
         let img = ImageReader::new(Cursor::new(raw))
@@ -756,9 +793,13 @@ fn optimize_cbz(
             .decode()
             .map_err(|e| format!("Decode error for {name}: {e}"))?;
 
-        let img = img.resize(width, height, FilterType::Lanczos3);
+        let img = if width < 9999 { img.resize(width, height, FilterType::Lanczos3) } else { img };
 
-        let img = image::DynamicImage::ImageLuma8(img.to_luma8());
+        let img = if grayscale {
+            image::DynamicImage::ImageLuma8(img.to_luma8())
+        } else {
+            img
+        };
 
         let img = if contrast {
             image::DynamicImage::ImageLuma8(image::imageops::contrast(&img.to_luma8(), 20.0))
@@ -786,7 +827,10 @@ fn optimize_cbz(
 pub async fn convert_comic(
     app: AppHandle,
     options: ConvertOptions,
+    cache: tauri::State<'_, MobiCache>,
+    cancel: tauri::State<'_, ConvertCancel>,
 ) -> Result<ConvertResult, String> {
+    cancel.0.store(false, Ordering::Relaxed);
     let input_path = PathBuf::from(&options.input_path);
     let output_dir = fs::canonicalize(&options.output_dir)
         .unwrap_or_else(|_| PathBuf::from(&options.output_dir));
@@ -801,8 +845,13 @@ pub async fn convert_comic(
 
     let (dev_w, dev_h, dev_name) = device_profile(&options.device);
 
-    let output_ext = if is_kobo(&options.device) { "cbz" } else { "mobi" };
-    let expected_output = output_dir.join(format!("{title}.{output_ext}"));
+    let output_ext = if is_cbz_output(&options.device) { "cbz" } else { "mobi" };
+    let output_name = if options.device == "optimize" {
+        format!("{title}_optimized.{output_ext}")
+    } else {
+        format!("{title}.{output_ext}")
+    };
+    let expected_output = output_dir.join(&output_name);
 
     if options.skip_existing && expected_output.exists() {
         let output_bytes = fs::metadata(&expected_output).map(|m| m.len() as usize).unwrap_or(0);
@@ -819,6 +868,9 @@ pub async fn convert_comic(
         });
     }
 
+    cache.0.lock().unwrap().remove(&expected_output);
+
+    let quality = options.quality.clamp(1, 100);
     let input_bytes = fs::metadata(&input_path).map(|m| m.len() as usize).unwrap_or(0);
     let input_size = format_size(input_bytes);
 
@@ -832,16 +884,17 @@ pub async fn convert_comic(
         .to_lowercase();
     let is_pdf = ext == "pdf";
 
-    let output_path = if is_kobo(&options.device) {
-        let cbz_path = output_dir.join(format!("{title}.cbz"));
+    let grayscale = options.device != "optimize";
+    let output_path = if is_cbz_output(&options.device) {
+        let cbz_path = expected_output.clone();
         if is_pdf {
             let tmp_dir = tempfile::TempDir::new()
                 .map_err(|e| format!("Cannot create temp dir: {e}"))?;
             emit_progress(&app, 0, 1, "Rendering PDF...");
             render_pdf_to_dir(&input_path, tmp_dir.path())?;
-            optimize_dir_to_cbz(tmp_dir.path(), &cbz_path, dev_w, dev_h, options.quality, options.contrast, &app)?;
+            optimize_dir_to_cbz(tmp_dir.path(), &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, &cancel.0, &app)?;
         } else {
-            optimize_cbz(&input_path, &cbz_path, dev_w, dev_h, options.quality, options.contrast, &app)?;
+            optimize_cbz(&input_path, &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, &cancel.0, &app)?;
         }
         cbz_path
     } else {
@@ -855,7 +908,7 @@ pub async fn convert_comic(
             name: dev_name,
         };
         let kindle_options = KindlingOptions {
-            jpeg_quality: options.quality,
+            jpeg_quality: quality,
             enhance: options.contrast,
             split: !options.no_split,
             crop: 0,
@@ -947,7 +1000,7 @@ fn image_ext_from_bytes(data: &[u8]) -> &'static str {
         "jpg"
     } else if data.len() >= 4 && data[0..4] == [0x89, 0x50, 0x4E, 0x47] {
         "png"
-    } else if data.len() >= 3 && &data[0..3] == b"GIF" {
+    } else if data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a") {
         "gif"
     } else if data.len() >= 2 && data[0] == 0x42 && data[1] == 0x4D {
         "bmp"
