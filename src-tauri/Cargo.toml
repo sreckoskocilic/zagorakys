@@ -1,6 +1,6 @@
 [package]
 name = "zagorakys"
-version = "0.3.0"
+version = "0.4.0"
 description = "CBR/CBZ to MOBI converter for Kindle"
 authors = ["skocho"]
 edition = "2021"
