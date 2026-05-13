@@ -13,7 +13,7 @@ pub struct ConvertOptions {
     pub output_dir: String,
     pub quality: u8,
     pub contrast: bool,
-    pub split_pages: bool,
+    pub no_split: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -157,7 +157,7 @@ pub async fn convert_comic(
     let kindle_options = KindlingOptions {
         jpeg_quality: options.quality,
         enhance: options.contrast,
-        split: options.split_pages,
+        split: !options.no_split,
         crop: 0,
         panel_view: false,
         embed_source: false,
@@ -165,6 +165,9 @@ pub async fn convert_comic(
     };
 
     emit_progress(&app, 0, 1, "Converting...");
+
+    #[cfg(windows)]
+    ensure_bsdtar_available();
 
     #[cfg(unix)]
     let _gag = {
@@ -204,6 +207,24 @@ pub async fn convert_comic(
         input_size,
         title,
     })
+}
+
+#[cfg(windows)]
+fn ensure_bsdtar_available() {
+    use std::env;
+    let system32 = PathBuf::from(r"C:\Windows\System32");
+    let tar = system32.join("tar.exe");
+    if tar.exists() {
+        let bin_dir = env::temp_dir().join("zagorakys_bin");
+        let _ = fs::create_dir_all(&bin_dir);
+        let link = bin_dir.join("bsdtar.exe");
+        if !link.exists() {
+            let _ = fs::copy(&tar, &link);
+        }
+        if let Ok(path) = env::var("PATH") {
+            env::set_var("PATH", format!("{};{}", bin_dir.display(), path));
+        }
+    }
 }
 
 fn emit_progress(app: &AppHandle, current: usize, total: usize, message: &str) {

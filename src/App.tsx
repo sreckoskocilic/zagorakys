@@ -37,7 +37,7 @@ function App() {
   const [error, setError] = useState("");
   const [convertResult, setConvertResult] = useState<ConvertResult | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [splitPages, setSplitPages] = useState(true);
+  const [noSplit, setNoSplit] = useState(false);
 
   const [mobiPath, setMobiPath] = useState("");
   const [mobiInfo, setMobiInfo] = useState<MobiInfo | null>(null);
@@ -89,7 +89,7 @@ function App() {
           output_dir: dir,
           quality,
           contrast,
-          split_pages: splitPages,
+          no_split: noSplit,
         },
       });
       setConvertResult(result);
@@ -247,10 +247,10 @@ function App() {
               <label className="checkbox-label">
                 <input
                   type="checkbox"
-                  checked={splitPages}
-                  onChange={(e) => setSplitPages(e.target.checked)}
+                  checked={noSplit}
+                  onChange={(e) => setNoSplit(e.target.checked)}
                 />
-                Split double pages
+                Don't split double pages
               </label>
             </div>
           )}
