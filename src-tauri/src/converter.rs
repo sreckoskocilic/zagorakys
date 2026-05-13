@@ -212,18 +212,42 @@ pub async fn convert_comic(
 #[cfg(windows)]
 fn ensure_bsdtar_available() {
     use std::env;
-    let system32 = PathBuf::from(r"C:\Windows\System32");
-    let tar = system32.join("tar.exe");
-    if tar.exists() {
-        let bin_dir = env::temp_dir().join("zagorakys_bin");
-        let _ = fs::create_dir_all(&bin_dir);
-        let link = bin_dir.join("bsdtar.exe");
-        if !link.exists() {
-            let _ = fs::copy(&tar, &link);
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // Copy tar.exe as bsdtar.exe so kindling finds it
+        let system32 = PathBuf::from(r"C:\Windows\System32");
+        let tar = system32.join("tar.exe");
+        if tar.exists() {
+            let bin_dir = env::temp_dir().join("zagorakys_bin");
+            let _ = fs::create_dir_all(&bin_dir);
+            let link = bin_dir.join("bsdtar.exe");
+            if !link.exists() {
+                let _ = fs::copy(&tar, &link);
+            }
+            if let Ok(path) = env::var("PATH") {
+                env::set_var("PATH", format!("{};{}", bin_dir.display(), path));
+            }
         }
-        if let Ok(path) = env::var("PATH") {
-            env::set_var("PATH", format!("{};{}", bin_dir.display(), path));
+
+        // Hide console so bsdtar spawns don't flash CMD windows
+        unsafe {
+            winapi::AllocConsole();
+            let hwnd = winapi::GetConsoleWindow();
+            if !hwnd.is_null() {
+                winapi::ShowWindow(hwnd, 0); // SW_HIDE
+            }
         }
+    });
+}
+
+#[cfg(windows)]
+mod winapi {
+    extern "system" {
+        pub fn AllocConsole() -> i32;
+        pub fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        pub fn ShowWindow(hwnd: *mut std::ffi::c_void, cmd: i32) -> i32;
     }
 }
 

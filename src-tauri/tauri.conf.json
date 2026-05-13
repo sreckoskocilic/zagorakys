@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Zagorakys",
-        "width": 900,
-        "height": 700,
+        "width": 680,
+        "height": 820,
         "resizable": true,
         "fullscreen": false
       }
