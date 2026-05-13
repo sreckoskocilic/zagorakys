@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nickel-org/nickel.rs/master/schema/nickel-config.schema.json",
   "productName": "Zagorakys",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "com.zagorakys.app",
   "build": {
     "frontendDist": "../dist",

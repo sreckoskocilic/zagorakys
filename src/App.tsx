@@ -4,8 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
 interface ConvertResult {
-  mobi_path: string;
-  mobi_size: string;
+  output_path: string;
+  output_size: string;
   input_size: string;
   title: string;
   elapsed: string;
@@ -20,6 +20,8 @@ interface ConvertProgress {
 interface MobiInfo {
   page_count: number;
   file_size: string;
+  title: string;
+  author: string;
 }
 
 interface MobiPage {
@@ -39,6 +41,7 @@ function App() {
   const [convertResult, setConvertResult] = useState<ConvertResult | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [noSplit, setNoSplit] = useState(false);
+  const [device, setDevice] = useState(() => localStorage.getItem("zagorakys-device") || "kindle4");
   const [batchFiles, setBatchFiles] = useState<string[]>([]);
   const [batchIndex, setBatchIndex] = useState(0);
   const [batchResults, setBatchResults] = useState<ConvertResult[]>([]);
@@ -63,6 +66,10 @@ function App() {
     }
     localStorage.setItem("zagorakys-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem("zagorakys-device", device);
+  }, [device]);
 
   useEffect(() => {
     const unlisten = listen<ConvertProgress>("convert-progress", (event) => {
@@ -111,10 +118,13 @@ function App() {
           quality,
           contrast,
           no_split: noSplit,
+          device,
         },
       });
       setConvertResult(result);
-      loadMobi(result.mobi_path);
+      if (result.output_path.endsWith(".mobi")) {
+        loadMobi(result.output_path);
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -172,7 +182,10 @@ function App() {
     setConverting(false);
     setProgress(null);
     if (results.length > 0) {
-      loadMobi(results[results.length - 1].mobi_path);
+      const last = results[results.length - 1];
+      if (last.output_path.endsWith(".mobi")) {
+        loadMobi(last.output_path);
+      }
     }
   };
 
@@ -270,13 +283,6 @@ function App() {
             Select Folder
           </button>
 
-          {comicPath && (
-            <span className="selected-file">{fileName(comicPath)}</span>
-          )}
-          {isBatch && (
-            <span className="selected-file">{batchFiles.length} comics found</span>
-          )}
-
           <button
             className="sidebar-btn primary"
             onClick={handleConvert}
@@ -309,31 +315,11 @@ function App() {
             </div>
           )}
 
-          {convertResult && (
-            <div className="msg success">
-              {convertResult.title}.mobi ({convertResult.mobi_size}) &middot; {convertResult.elapsed}
-            </div>
-          )}
-
-          {batchResults.length > 0 && !converting && (
-            <div className="msg success">
-              {batchResults.length} files converted{batchElapsed && ` · ${batchElapsed}`}
-            </div>
-          )}
-
           <div className="divider" />
 
           <button className="sidebar-btn" onClick={openMobi}>
             Open MOBI
           </button>
-          {mobiPath && (
-            <span className="selected-file">{fileName(mobiPath)}</span>
-          )}
-          {mobiInfo && (
-            <span className="selected-file">
-              {mobiInfo.page_count} pages &middot; {mobiInfo.file_size}
-            </span>
-          )}
         </div>
 
         {error && <div className="msg error">{error}</div>}
@@ -378,6 +364,19 @@ function App() {
                 />
                 Don't split double pages
               </label>
+
+              <div className="setting-row">
+                <select
+                  className="theme-select"
+                  value={device}
+                  onChange={(e) => setDevice(e.target.value)}
+                >
+                  <option value="kindle4">Kindle 4 (600×800)</option>
+                  <option value="kindle-paperwhite">Kindle Paperwhite (1072×1448)</option>
+                  <option value="kindle-oasis">Kindle Oasis (1264×1680)</option>
+                  <option value="kobo-clara-hd">Kobo Clara HD (1072×1448)</option>
+                </select>
+              </div>
 
               <div className="setting-row">
                 <select
@@ -447,6 +446,14 @@ function App() {
                 </div>
               </div>
             </div>
+            {mobiInfo && (
+              <div className="preview-status">
+                <span className="status-title">{mobiInfo.title || fileName(mobiPath)}</span>
+                {mobiInfo.author && mobiInfo.author !== "kindling" && <span className="status-author">{mobiInfo.author}</span>}
+                <span className="status-meta">{mobiInfo.page_count} pages &middot; {mobiInfo.file_size}</span>
+                {(convertResult?.elapsed || batchElapsed) && <span className="status-meta">{convertResult?.elapsed || batchElapsed}</span>}
+              </div>
+            )}
           </>
         ) : (
           <div className="preview-empty">

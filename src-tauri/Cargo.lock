@@ -5972,6 +5972,7 @@ name = "zagorakys"
 version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
+ "image",
  "kindling-mobi",
  "libc",
  "serde",
@@ -5980,6 +5981,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tempfile",
+ "zip",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 [package]
 name = "zagorakys"
-version = "0.2.0"
+version = "0.3.0"
 description = "CBR/CBZ to MOBI converter for Kindle"
 authors = ["skocho"]
 edition = "2021"
@@ -20,6 +20,8 @@ serde_json = "1"
 base64 = "0.22"
 tempfile = "3"
 kindling = { git = "https://github.com/ciscoriordan/kindling", package = "kindling-mobi" }
+image = "0.25"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 libc = "0.2"
 
 [profile.dev]
