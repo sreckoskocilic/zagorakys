@@ -478,6 +478,8 @@ pub async fn convert_comic(
         .file_stem()
         .unwrap_or_default()
         .to_string_lossy()
+        .trim_end_matches('.')
+        .trim()
         .to_string();
 
     let (dev_w, dev_h, dev_name) = device_profile(&options.device);
