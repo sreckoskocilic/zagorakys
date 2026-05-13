@@ -169,6 +169,7 @@ function App() {
             quality,
             contrast,
             no_split: noSplit,
+            device,
           },
         });
         results.push(result);
