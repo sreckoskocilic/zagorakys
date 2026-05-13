@@ -8,6 +8,7 @@ interface ConvertResult {
   mobi_size: string;
   input_size: string;
   title: string;
+  elapsed: string;
 }
 
 interface ConvertProgress {
@@ -30,7 +31,7 @@ interface MobiPage {
 function App() {
   const [comicPath, setComicPath] = useState("");
   const [outputDir, setOutputDir] = useState("");
-  const [quality] = useState(20);
+  const [quality, setQuality] = useState(20);
   const [contrast, setContrast] = useState(false);
   const [converting, setConverting] = useState(false);
   const [progress, setProgress] = useState<ConvertProgress | null>(null);
@@ -38,12 +39,30 @@ function App() {
   const [convertResult, setConvertResult] = useState<ConvertResult | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [noSplit, setNoSplit] = useState(false);
+  const [batchFiles, setBatchFiles] = useState<string[]>([]);
+  const [batchIndex, setBatchIndex] = useState(0);
+  const [batchResults, setBatchResults] = useState<ConvertResult[]>([]);
+  const [batchElapsed, setBatchElapsed] = useState("");
 
   const [mobiPath, setMobiPath] = useState("");
   const [mobiInfo, setMobiInfo] = useState<MobiInfo | null>(null);
   const [currentPage, setCurrentPage] = useState(0);
   const [pageImage, setPageImage] = useState("");
   const [loadingPage, setLoadingPage] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem("zagorakys-theme");
+    return ["ember", "jade", "iris", "rose"].includes(saved ?? "") ? saved! : "ember";
+  });
+
+  useEffect(() => {
+    if (theme === "ember") {
+      document.documentElement.removeAttribute("data-theme");
+    } else {
+      document.documentElement.setAttribute("data-theme", theme);
+    }
+    localStorage.setItem("zagorakys-theme", theme);
+  }, [theme]);
 
   useEffect(() => {
     const unlisten = listen<ConvertProgress>("convert-progress", (event) => {
@@ -63,7 +82,9 @@ function App() {
     });
     if (selected) {
       setComicPath(selected as string);
+      setBatchFiles([]);
       setConvertResult(null);
+      setBatchResults([]);
       setError("");
       const dir = (selected as string).replace(/[/\\][^/\\]+$/, "");
       if (!outputDir) setOutputDir(dir);
@@ -101,6 +122,60 @@ function App() {
     setProgress(null);
   };
 
+  const selectFolder = async () => {
+    const selected = await open({ directory: true });
+    if (!selected) return;
+    const comics = await invoke<string[]>("list_comics", { dir: selected as string });
+    if (comics.length === 0) {
+      setError("No comic files found in folder");
+      return;
+    }
+    setComicPath("");
+    setConvertResult(null);
+    setBatchFiles(comics);
+    setBatchResults([]);
+    setBatchIndex(0);
+    setError("");
+    if (!outputDir) setOutputDir(selected as string);
+  };
+
+  const batchConvert = async () => {
+    if (batchFiles.length === 0) return;
+    const dir = outputDir || batchFiles[0].replace(/[/\\][^/\\]+$/, "");
+    setConverting(true);
+    setError("");
+    setBatchResults([]);
+    setBatchElapsed("");
+    const start = Date.now();
+    const results: ConvertResult[] = [];
+    for (let i = 0; i < batchFiles.length; i++) {
+      setBatchIndex(i);
+      setProgress({ current: i, total: batchFiles.length, message: `${fileName(batchFiles[i])} (${i + 1}/${batchFiles.length})` });
+      try {
+        const result = await invoke<ConvertResult>("convert_comic", {
+          options: {
+            input_path: batchFiles[i],
+            output_dir: dir,
+            quality,
+            contrast,
+            no_split: noSplit,
+          },
+        });
+        results.push(result);
+        setBatchResults([...results]);
+      } catch (e) {
+        setError(`${fileName(batchFiles[i])}: ${e}`);
+      }
+    }
+    const secs = (Date.now() - start) / 1000;
+    setBatchElapsed(secs >= 60 ? `${Math.floor(secs / 60)}m ${(secs % 60).toFixed(1)}s` : `${secs.toFixed(1)}s`);
+    setConverting(false);
+    setProgress(null);
+    if (results.length > 0) {
+      loadMobi(results[results.length - 1].mobi_path);
+    }
+  };
+
   const openMobi = async () => {
     const selected = await open({
       multiple: false,
@@ -113,6 +188,7 @@ function App() {
     setError("");
     setMobiPath(path);
     setPageImage("");
+    setZoom(1);
     try {
       const info = await invoke<MobiInfo>("get_mobi_info", { path });
       setMobiInfo(info);
@@ -139,6 +215,9 @@ function App() {
     [],
   );
 
+  const zoomIn = () => setZoom(z => Math.min(3, +(z + 0.25).toFixed(2)));
+  const zoomOut = () => setZoom(z => Math.max(0.25, +(z - 0.25).toFixed(2)));
+
   const prevPage = () => {
     if (currentPage > 0) loadPage(mobiPath, currentPage - 1);
   };
@@ -157,6 +236,23 @@ function App() {
     return () => window.removeEventListener("keydown", handler);
   });
 
+  const isBatch = batchFiles.length > 0;
+  const hasInput = comicPath || isBatch;
+
+  const handleConvert = () => {
+    if (isBatch) batchConvert();
+    else convert();
+  };
+
+  const convertLabel = () => {
+    if (!converting) {
+      if (isBatch) return `Convert ${batchFiles.length} Files`;
+      return "Convert to MOBI";
+    }
+    if (isBatch) return `Converting ${batchIndex + 1}/${batchFiles.length}...`;
+    return "Converting...";
+  };
+
   const progressPercent =
     progress && progress.total > 0
       ? Math.round((progress.current / progress.total) * 100)
@@ -166,22 +262,42 @@ function App() {
     <div className="app">
       <div className="sidebar">
         <div className="sidebar-actions">
-          <button className="sidebar-btn" onClick={selectComic}>
+          <button className="sidebar-btn" onClick={selectComic} disabled={converting}>
             Select Comic
           </button>
+
+          <button className="sidebar-btn" onClick={selectFolder} disabled={converting}>
+            Select Folder
+          </button>
+
           {comicPath && (
             <span className="selected-file">{fileName(comicPath)}</span>
+          )}
+          {isBatch && (
+            <span className="selected-file">{batchFiles.length} comics found</span>
           )}
 
           <button
             className="sidebar-btn primary"
-            onClick={convert}
-            disabled={!comicPath || converting}
+            onClick={handleConvert}
+            disabled={!hasInput || converting}
           >
-            {converting ? "Converting..." : "Convert to MOBI"}
+            {convertLabel()}
           </button>
 
-          {converting && progress && (
+          {converting && isBatch && (
+            <div className="progress-section">
+              <div className="progress-bar">
+                <div
+                  className="progress-fill"
+                  style={{ width: `${Math.round(((batchIndex + (batchResults.length > batchIndex ? 1 : 0)) / batchFiles.length) * 100)}%` }}
+                />
+              </div>
+              <p className="progress-text">{fileName(batchFiles[batchIndex])} ({batchIndex + 1}/{batchFiles.length})</p>
+            </div>
+          )}
+
+          {converting && !isBatch && progress && (
             <div className="progress-section">
               <div className="progress-bar">
                 <div
@@ -195,7 +311,13 @@ function App() {
 
           {convertResult && (
             <div className="msg success">
-              {convertResult.title}.mobi ({convertResult.mobi_size})
+              {convertResult.title}.mobi ({convertResult.mobi_size}) &middot; {convertResult.elapsed}
+            </div>
+          )}
+
+          {batchResults.length > 0 && !converting && (
+            <div className="msg success">
+              {batchResults.length} files converted{batchElapsed && ` · ${batchElapsed}`}
             </div>
           )}
 
@@ -217,13 +339,6 @@ function App() {
         {error && <div className="msg error">{error}</div>}
 
         <div className="sidebar-bottom">
-          <button
-            className={`settings-toggle ${showSettings ? "active" : ""}`}
-            onClick={() => setShowSettings(!showSettings)}
-          >
-            ⚙ Settings
-          </button>
-
           {showSettings && (
             <div className="settings-panel">
               <div className="setting-row">
@@ -234,6 +349,17 @@ function App() {
                   {outputDir || "Same as input"}
                 </span>
               </div>
+
+              <label className="checkbox-label">
+                Quality: {quality}
+                <input
+                  type="range"
+                  min={1}
+                  max={100}
+                  value={quality}
+                  onChange={(e) => setQuality(Number(e.target.value))}
+                />
+              </label>
 
               <label className="checkbox-label">
                 <input
@@ -252,8 +378,27 @@ function App() {
                 />
                 Don't split double pages
               </label>
+
+              <div className="setting-row">
+                <select
+                  className="theme-select"
+                  value={theme}
+                  onChange={(e) => setTheme(e.target.value)}
+                >
+                  <option value="ember">Ember</option>
+                  <option value="jade">Jade</option>
+                  <option value="iris">Iris</option>
+                  <option value="rose">Rose</option>
+                </select>
+              </div>
             </div>
           )}
+          <button
+            className="sidebar-btn"
+            onClick={() => setShowSettings(!showSettings)}
+          >
+            Settings
+          </button>
         </div>
       </div>
 
@@ -275,13 +420,32 @@ function App() {
               >
                 ▶
               </button>
+              <span className="nav-separator">|</span>
+              <button onClick={zoomOut} disabled={zoom <= 0.25}>−</button>
+              <span className="zoom-label">{Math.round(zoom * 100)}%</span>
+              <button onClick={zoomIn} disabled={zoom >= 3}>+</button>
             </div>
-            <div className="preview-image-container">
-              <img
-                src={pageImage}
-                alt={`Page ${currentPage + 1}`}
-                className={loadingPage ? "loading" : ""}
-              />
+            <div
+              className="preview-image-container"
+              style={zoom > 1 ? { overflow: 'auto', alignItems: 'flex-start', justifyContent: 'flex-start' } : undefined}
+            >
+              <div className="kindle-frame">
+                <div className="kindle-bezel">
+                  <span className="kindle-label">Kindle</span>
+                  <div className="kindle-screen">
+                    <img
+                      src={pageImage}
+                      alt={`Page ${currentPage + 1}`}
+                      className={loadingPage ? "loading" : ""}
+                      style={zoom !== 1 ? {
+                        maxWidth: 'none',
+                        maxHeight: 'none',
+                        width: `${zoom * 100}%`,
+                      } : undefined}
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
           </>
         ) : (

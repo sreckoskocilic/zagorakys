@@ -29,6 +29,7 @@ pub struct ConvertResult {
     pub mobi_size: String,
     pub input_size: String,
     pub title: String,
+    pub elapsed: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -42,6 +43,30 @@ pub struct MobiPage {
     pub image: String,
     pub page: usize,
     pub page_count: usize,
+}
+
+#[command]
+pub async fn list_comics(dir: String) -> Result<Vec<String>, String> {
+    let dir = PathBuf::from(&dir);
+    if !dir.is_dir() {
+        return Err("Not a directory".to_string());
+    }
+    let exts = ["cbr", "cbz", "rar", "zip"];
+    let mut comics: Vec<String> = fs::read_dir(&dir)
+        .map_err(|e| format!("Cannot read directory: {e}"))?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let ext = path.extension()?.to_str()?.to_lowercase();
+            if exts.contains(&ext.as_str()) {
+                Some(path.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    comics.sort();
+    Ok(comics)
 }
 
 fn extract_images_from_mobi(path: &Path) -> Result<Vec<Vec<u8>>, String> {
@@ -166,6 +191,8 @@ pub async fn convert_comic(
 
     emit_progress(&app, 0, 1, "Converting...");
 
+    let start = std::time::Instant::now();
+
     #[cfg(windows)]
     ensure_bsdtar_available();
 
@@ -199,6 +226,13 @@ pub async fn convert_comic(
         .map(|m| format_size(m.len() as usize))
         .unwrap_or_default();
 
+    let duration = start.elapsed();
+    let elapsed = if duration.as_secs() >= 60 {
+        format!("{}m {:.1}s", duration.as_secs() / 60, duration.as_secs_f64() % 60.0)
+    } else {
+        format!("{:.1}s", duration.as_secs_f64())
+    };
+
     emit_progress(&app, 1, 1, "Done!");
 
     Ok(ConvertResult {
@@ -206,6 +240,7 @@ pub async fn convert_comic(
         mobi_size,
         input_size,
         title,
+        elapsed,
     })
 }
 
