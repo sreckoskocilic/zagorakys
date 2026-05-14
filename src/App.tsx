@@ -59,6 +59,7 @@ function App() {
   const [skipExisting, setSkipExisting] = useState(() => localStorage.getItem("zagorakys-skip") === "true");
   const [hideCover, setHideCover] = useState(() => localStorage.getItem("zagorakys-hidecover") === "true");
   const cancelRef = useRef(false);
+  const pageRequestId = useRef(0);
 
   const [mobiPath, setMobiPath] = useState("");
   const [mobiInfo, setMobiInfo] = useState<MobiInfo | null>(null);
@@ -104,6 +105,40 @@ function App() {
       unlisten.then((f) => f());
     };
   }, []);
+
+  const loadPage = useCallback(
+    async (path: string, page: number) => {
+      const reqId = ++pageRequestId.current;
+      setLoadingPage(true);
+      try {
+        const result = await invoke<MobiPage>("get_mobi_page", { path, page });
+        if (reqId !== pageRequestId.current) return;
+        setPageImage(result.image);
+        setCurrentPage(result.page);
+      } catch (e) {
+        if (reqId !== pageRequestId.current) return;
+        setError(String(e));
+      }
+      setLoadingPage(false);
+    },
+    [],
+  );
+
+  const loadMobi = useCallback(async (path: string) => {
+    setError("");
+    setMobiPath(path);
+    setPageImage("");
+    setZoom(1);
+    try {
+      const info = await invoke<MobiInfo>("get_mobi_info", { path });
+      setMobiInfo(info);
+      setCurrentPage(0);
+      loadPage(path, 0);
+    } catch (e) {
+      setError(String(e));
+      setMobiInfo(null);
+    }
+  }, [loadPage]);
 
   useEffect(() => {
     const exts = ["cbr", "cbz", "rar", "zip", "pdf", "mobi"];
@@ -179,7 +214,7 @@ function App() {
       }
     });
     return () => { unlisten.then((f) => f()); };
-  }, [outputDir]);
+  }, [outputDir, loadMobi]);
 
   const selectComic = async () => {
     const selected = await open({
@@ -322,37 +357,6 @@ function App() {
     if (selected) loadMobi(selected as string);
   };
 
-  const loadMobi = async (path: string) => {
-    setError("");
-    setMobiPath(path);
-    setPageImage("");
-    setZoom(1);
-    try {
-      const info = await invoke<MobiInfo>("get_mobi_info", { path });
-      setMobiInfo(info);
-      setCurrentPage(0);
-      loadPage(path, 0);
-    } catch (e) {
-      setError(String(e));
-      setMobiInfo(null);
-    }
-  };
-
-  const loadPage = useCallback(
-    async (path: string, page: number) => {
-      setLoadingPage(true);
-      try {
-        const result = await invoke<MobiPage>("get_mobi_page", { path, page });
-        setPageImage(result.image);
-        setCurrentPage(result.page);
-      } catch (e) {
-        setError(String(e));
-      }
-      setLoadingPage(false);
-    },
-    [],
-  );
-
   const zoomIn = () => setZoom(z => Math.min(3, +(z + 0.25).toFixed(2)));
   const zoomOut = () => setZoom(z => Math.max(0.25, +(z - 0.25).toFixed(2)));
 
@@ -411,10 +415,6 @@ function App() {
           <button className="sidebar-btn" onClick={selectFolder} disabled={converting}>
             Select Folder
           </button>
-
-          {comicPath && !isBatch && (
-            <div className="selected-file" />
-          )}
 
           <button
             className="sidebar-btn primary"

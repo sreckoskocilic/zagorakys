@@ -129,7 +129,7 @@ fn extract_mobi_metadata(data: &[u8]) -> (String, String) {
     let full_title = if rec.len() >= 92 {
         let title_offset = u32::from_be_bytes([rec[84], rec[85], rec[86], rec[87]]) as usize;
         let title_len = u32::from_be_bytes([rec[88], rec[89], rec[90], rec[91]]) as usize;
-        if title_offset + title_len <= rec.len() && title_len > 0 {
+        if title_len > 0 && title_offset.checked_add(title_len).map_or(false, |end| end <= rec.len()) {
             std::str::from_utf8(&rec[title_offset..title_offset + title_len])
                 .unwrap_or("")
                 .to_string()
@@ -150,7 +150,7 @@ fn extract_mobi_metadata(data: &[u8]) -> (String, String) {
                 rec[exth_offset + 10], rec[exth_offset + 11],
             ]) as usize;
             let mut pos = exth_offset + 12;
-            for _ in 0..num_items {
+            for _ in 0..num_items.min(1000) {
                 if pos + 8 > rec.len() { break; }
                 let rec_type = u32::from_be_bytes([rec[pos], rec[pos+1], rec[pos+2], rec[pos+3]]);
                 let rec_len = u32::from_be_bytes([rec[pos+4], rec[pos+5], rec[pos+6], rec[pos+7]]) as usize;
@@ -329,6 +329,7 @@ pub async fn get_mobi_page(
         "png" => "image/png",
         "gif" => "image/gif",
         "bmp" => "image/bmp",
+        "webp" => "image/webp",
         _ => "image/jpeg",
     };
     let b64 = {
@@ -1075,6 +1076,8 @@ fn image_ext_from_bytes(data: &[u8]) -> &'static str {
         "gif"
     } else if data.len() >= 2 && data[0] == 0x42 && data[1] == 0x4D {
         "bmp"
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        "webp"
     } else {
         "jpg"
     }
@@ -1127,8 +1130,10 @@ fn format_size(bytes: usize) -> String {
         format!("{bytes} B")
     } else if bytes < 1024 * 1024 {
         format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
+    } else if bytes < 1024 * 1024 * 1024 {
         format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
+    } else {
+        format!("{:.1} GB", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
     }
 }
 
@@ -1283,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn format_size_large() {
-        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2048.0 MB");
+    fn format_size_gigabytes() {
+        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.0 GB");
     }
 }
