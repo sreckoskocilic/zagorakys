@@ -2229,7 +2229,7 @@ dependencies = [
 [[package]]
 name = "kindling-mobi"
 version = "0.15.3"
-source = "git+https://github.com/ciscoriordan/kindling#b3d9ae4cf3c740658a5ab2799469c3595be65db8"
+source = "git+https://github.com/ciscoriordan/kindling?rev=b3d9ae4#b3d9ae4cf3c740658a5ab2799469c3595be65db8"
 dependencies = [
  "clap",
  "image",

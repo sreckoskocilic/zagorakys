@@ -1,27 +1,34 @@
 # Zagorakys
 
-Converts CBR/CBZ comic archives to MOBI files for my old Kindle4 device.
+Converts comic archives (CBR, CBZ, RAR, ZIP, PDF) to MOBI (Kindle) or CBZ (Kobo), with an optimize mode for reducing file size without device-specific conversion. Built-in book previewer.
 
 ## Install (Windows)
 
-1. Go to [Releases](https://github.com/skocho/zagorakys/releases)
-2. Download the `.msi` installer
+1. Go to [Releases](https://github.com/sreckoskocilic/zagorakys/releases)
+2. Download the `.exe` installer
 3. Run it — Windows may show a SmartScreen warning since the app isn't signed. Click "More info" then "Run anyway"
 
 ## How to use
 
 1. Open the app
-2. Click **Select Comic** and pick a `.cbr` or `.cbz` file
-3. Click **Convert to MOBI**
-4. The `.mobi` file is saved next to the original comic
-5. Copy the `.mobi` to your Kindle via USB
+2. Click **Select File** and pick a comic archive, or **Select Folder** for batch conversion
+3. Choose a device/mode in **Settings** (Kindle 4, Paperwhite, Oasis, Kobo Clara HD, or Optimize)
+4. Click the convert button (label changes based on device: Convert to MOBI, Convert to CBZ, or Optimize CBZ)
+5. The output file is saved next to the original (or in the configured output folder)
 
-The converted file shows up in the preview — you can flip through pages to check it looks right before transferring.
+You can also drag and drop files or folders directly onto the app.
+
+The converted file shows up in the preview — flip through pages to check it looks right before transferring.
 
 ## Settings
 
-- **Output Folder** — change where the `.mobi` gets saved (default: same folder as the comic)
+- **Device** — select your e-reader model or optimize mode
+- **Quality** — JPEG quality (1-100, default 20)
+- **Output Folder** — change where output gets saved (default: same folder as input)
 - **Enhance contrast** — bumps up contrast for e-ink screens
-- **Split double pages** — splits wide two-page spreads into separate pages (on by default)
+- **Don't split double pages** — keeps wide two-page spreads as single pages
+- **Skip already converted** — skip files that already have output in the target folder
+- **Hide Kindle frame** — show pages without the decorative Kindle bezel
+- **Theme** — Ember, Jade, Iris, or Rose
 
-You can also open any `.mobi` file directly with **Open MOBI** to preview it.
+You can open any `.mobi` or `.cbz` file directly with **Open Book** to preview it.

@@ -114,7 +114,7 @@ fn extract_mobi_metadata(data: &[u8]) -> (String, String) {
         return (pdb_title, String::new());
     }
 
-    let record0_offset = if data.len() > 82 {
+    let record0_offset = if data.len() >= 82 {
         u32::from_be_bytes([data[78], data[79], data[80], data[81]]) as usize
     } else {
         return (pdb_title, String::new());
@@ -126,7 +126,7 @@ fn extract_mobi_metadata(data: &[u8]) -> (String, String) {
 
     let rec = &data[record0_offset..];
 
-    let full_title = if rec.len() > 92 {
+    let full_title = if rec.len() >= 92 {
         let title_offset = u32::from_be_bytes([rec[84], rec[85], rec[86], rec[87]]) as usize;
         let title_len = u32::from_be_bytes([rec[88], rec[89], rec[90], rec[91]]) as usize;
         if title_offset + title_len <= rec.len() && title_len > 0 {
@@ -254,7 +254,7 @@ fn extract_images_from_cbz(path: &Path) -> Result<Vec<Vec<u8>>, String> {
 
 fn get_or_extract(cache: &MobiCache, path: &Path, preloaded: Option<&[u8]>) -> Result<Vec<Vec<u8>>, String> {
     {
-        let map = cache.0.lock().unwrap();
+        let map = cache.0.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(imgs) = map.get(path) {
             return Ok(imgs.clone());
         }
@@ -267,9 +267,11 @@ fn get_or_extract(cache: &MobiCache, path: &Path, preloaded: Option<&[u8]>) -> R
     } else {
         extract_images_from_mobi(path)?
     };
-    let mut map = cache.0.lock().unwrap();
+    let mut map = cache.0.lock().unwrap_or_else(|p| p.into_inner());
     if map.len() >= 3 {
-        map.clear();
+        if let Some(oldest) = map.keys().next().cloned() {
+            map.remove(&oldest);
+        }
     }
     map.insert(path.to_path_buf(), images.clone());
     Ok(images)
@@ -419,11 +421,15 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
             .map_err(|e| format!("Failed to run unrar: {e}"))?;
 
         if !status.success() {
-            let _ = std::process::Command::new(&unrar)
+            let retry = std::process::Command::new(&unrar)
                 .args(["e", "-o+", "--"])
                 .arg(input_path)
                 .arg(dest_dir)
-                .status();
+                .status()
+                .map_err(|e| format!("Failed to run unrar: {e}"))?;
+            if !retry.success() {
+                return Err("unrar failed to extract archive".to_string());
+            }
         }
 
         let mut images: Vec<PathBuf> = fs::read_dir(dest_dir)
@@ -810,7 +816,10 @@ fn optimize_cbz(
                 return Err("Cancelled".to_string());
             }
             let jpeg_data = process_image(raw, width, height, quality, contrast, grayscale, resize)?;
-            let out_name = Path::new(name).with_extension("jpg").to_string_lossy().to_string();
+            let out_name = Path::new(name)
+                .file_name()
+                .map(|n| Path::new(n).with_extension("jpg").to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("{:04}.jpg", 0));
             Ok((out_name, jpeg_data))
         })
         .collect();
@@ -887,12 +896,15 @@ pub async fn convert_comic(
                 break candidate;
             }
             counter += 1;
+            if counter > 9999 {
+                return Err("Too many output files with the same name".to_string());
+            }
         }
     } else {
         expected_output
     };
 
-    cache.0.lock().unwrap().remove(&expected_output);
+    cache.0.lock().unwrap_or_else(|p| p.into_inner()).remove(&expected_output);
 
     let is_optimize = options.device == "optimize";
     let quality = options.quality.clamp(1, 100);
@@ -958,7 +970,10 @@ pub async fn convert_comic(
         }
 
         let img_count = fs::read_dir(tmp_dir.path())
-            .map(|rd| rd.filter_map(|e| e.ok()).count())
+            .map(|rd| rd.filter_map(|e| {
+                let ext = e.ok()?.path().extension()?.to_str()?.to_lowercase();
+                ["jpg", "jpeg", "png", "webp", "ppm"].contains(&ext.as_str()).then_some(())
+            }).count())
             .unwrap_or(0);
         if img_count == 0 {
             return Err("No images found".to_string());
