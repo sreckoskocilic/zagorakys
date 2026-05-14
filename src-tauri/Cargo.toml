@@ -1,6 +1,6 @@
 [package]
 name = "zagorakys"
-version = "1.1.0"
+version = "1.2.0"
 description = "Comic archive converter and optimizer for Kindle and Kobo"
 authors = ["skocho"]
 edition = "2021"
