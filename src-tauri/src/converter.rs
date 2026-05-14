@@ -959,6 +959,7 @@ pub async fn convert_comic(
         build_comic_with_options(tmp_dir.path(), &mobi_path, &profile, &kindle_options)
             .map_err(|e| format!("Kindling error: {e}"))?;
 
+        #[cfg(unix)]
         drop(_gag);
 
         mobi_path
