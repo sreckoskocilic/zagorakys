@@ -565,14 +565,19 @@ function App() {
                 <label className="checkbox-label">
                   Quality:
                   <input
-                    type="number"
+                    type="text"
+                    inputMode="numeric"
                     className="quality-input"
-                    min={1}
-                    max={100}
                     value={quality}
                     onChange={(e) => {
-                      const v = Math.max(1, Math.min(100, Number(e.target.value) || 1));
-                      setQuality(v);
+                      const raw = e.target.value.replace(/\D/g, "");
+                      if (raw === "") { setQuality("" as any); return; }
+                      const n = Math.min(100, Number(raw));
+                      setQuality(n);
+                    }}
+                    onBlur={() => {
+                      const n = Number(quality);
+                      setQuality((!n || n < 1) ? 1 : Math.min(100, n));
                     }}
                   />
                 </label>
