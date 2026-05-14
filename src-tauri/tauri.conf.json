@@ -35,8 +35,10 @@
     "active": true,
     "createUpdaterArtifacts": "v1Compatible",
     "targets": ["nsis"],
-    "nsis": {
-      "installMode": "both"
+    "windows": {
+      "nsis": {
+        "installMode": "both"
+      }
     },
     "icon": [
       "icons/32x32.png",
