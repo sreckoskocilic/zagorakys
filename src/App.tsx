@@ -222,6 +222,7 @@ function App() {
           contrast,
           no_split: noSplit,
           device,
+          skip_existing: skipExisting,
         },
       });
       setConvertResult(result);
@@ -287,8 +288,10 @@ function App() {
         results.push(result);
         setBatchResults([...results]);
       } catch (e) {
-        errors.push(fileName(batchFiles[i]));
-        setBatchErrors([...errors]);
+        if (!String(e).includes("Cancelled")) {
+          errors.push(fileName(batchFiles[i]));
+          setBatchErrors([...errors]);
+        }
       }
     }
     const secs = (Date.now() - start) / 1000;
@@ -695,10 +698,10 @@ function App() {
               {convertResult && !convertResult.skipped && !isBatch && convertResult.input_bytes > 0 ? (
                 <>
                   <span className="status-meta">
-                    {convertResult.input_size} → {convertResult.output_size} (−{Math.round((1 - convertResult.output_bytes / convertResult.input_bytes) * 100)}%)
+                    {convertResult.input_size} → {convertResult.output_size} ({convertResult.output_bytes <= convertResult.input_bytes ? "−" : "+"}{Math.abs(Math.round((1 - convertResult.output_bytes / convertResult.input_bytes) * 100))}%)
                   </span>
                   <span className="status-dict">
-                    {"{"}<em>Quality</em>{`: ${quality}, `}<em>Duration</em>{`: ${Math.round(parseFloat(convertResult.elapsed))}s}`}
+                    {"{"}<em>Quality</em>{`: ${quality}, `}<em>Duration</em>{`: ${convertResult.elapsed}}`}
                   </span>
                 </>
               ) : (
@@ -727,7 +730,7 @@ function fileName(path: string): string {
 }
 
 function shortPath(path: string): string {
-  const home = path.match(/^(\/Users\/[^/]+)/)?.[1];
+  const home = path.match(/^(\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)/)?.[1];
   return home ? "~" + path.slice(home.length) : path;
 }
 

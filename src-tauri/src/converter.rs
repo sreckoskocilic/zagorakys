@@ -142,7 +142,8 @@ fn extract_mobi_metadata(data: &[u8]) -> (String, String) {
 
     let mut author = String::new();
     if rec.len() > 20 {
-        let exth_offset = 16 + u32::from_be_bytes([rec[20], rec[21], rec[22], rec[23]]) as usize;
+        let header_len = u32::from_be_bytes([rec[20], rec[21], rec[22], rec[23]]) as usize;
+        if let Some(exth_offset) = 16usize.checked_add(header_len) {
         if exth_offset + 12 <= rec.len() && &rec[exth_offset..exth_offset + 4] == b"EXTH" {
             let num_items = u32::from_be_bytes([
                 rec[exth_offset + 8], rec[exth_offset + 9],
@@ -161,6 +162,7 @@ fn extract_mobi_metadata(data: &[u8]) -> (String, String) {
                 }
                 pos += rec_len;
             }
+        }
         }
     }
 
@@ -462,6 +464,22 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
 }
 
 fn find_unrar() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in ["UnRAR.exe", "unrar.exe"] {
+                let p = dir.join(name);
+                if p.exists() {
+                    return Some(p);
+                }
+                let p = dir.join("resources").join(name);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+
     let candidates = if cfg!(windows) {
         vec![
             r"C:\Program Files\WinRAR\UnRAR.exe".to_string(),
@@ -811,7 +829,8 @@ fn optimize_cbz(
     emit_progress(app, 0, total, &format!("Processing 0/{total}"));
 
     let processed: Vec<Result<(String, Vec<u8>), String>> = entries.par_iter()
-        .map(|(name, raw)| {
+        .enumerate()
+        .map(|(i, (name, raw))| {
             if cancel.load(Ordering::Relaxed) {
                 return Err("Cancelled".to_string());
             }
@@ -819,7 +838,7 @@ fn optimize_cbz(
             let out_name = Path::new(name)
                 .file_name()
                 .map(|n| Path::new(n).with_extension("jpg").to_string_lossy().into_owned())
-                .unwrap_or_else(|| format!("{:04}.jpg", 0));
+                .unwrap_or_else(|| format!("{:04}.jpg", i));
             Ok((out_name, jpeg_data))
         })
         .collect();
@@ -931,15 +950,17 @@ pub async fn convert_comic(
                 .map_err(|e| format!("Cannot create temp dir: {e}"))?;
             emit_progress(&app, 0, 1, "Rendering PDF...");
             render_pdf_to_dir(&input_path, tmp_dir.path())?;
-            optimize_dir_to_cbz(tmp_dir.path(), &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, resize, &cancel.0, &app)?;
+            optimize_dir_to_cbz(tmp_dir.path(), &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, resize, &cancel.0, &app)
+                .map_err(|e| { let _ = fs::remove_file(&cbz_path); e })?;
         } else {
-            optimize_cbz(&input_path, &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, resize, &cancel.0, &app)?;
+            optimize_cbz(&input_path, &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, resize, &cancel.0, &app)
+                .map_err(|e| { let _ = fs::remove_file(&cbz_path); e })?;
         }
         cbz_path
     } else {
         use kindling::comic::{build_comic_with_options, ComicOptions as KindlingOptions, DeviceProfile};
 
-        let mobi_path = output_dir.join(format!("{title}.mobi"));
+        let mobi_path = expected_output.clone();
         let profile = DeviceProfile {
             width: dev_w,
             height: dev_h,
@@ -987,7 +1008,10 @@ pub async fn convert_comic(
         let _gag = StderrGuard::new();
 
         build_comic_with_options(tmp_dir.path(), &mobi_path, &profile, &kindle_options)
-            .map_err(|e| format!("Kindling error: {e}"))?;
+            .map_err(|e| {
+                let _ = fs::remove_file(&mobi_path);
+                format!("Kindling error: {e}")
+            })?;
 
         #[cfg(unix)]
         drop(_gag);
@@ -1068,7 +1092,11 @@ impl StderrGuard {
         let devnull = fs::File::open("/dev/null").ok()?;
         let old_fd = unsafe { libc::dup(2) };
         if old_fd < 0 { return None; }
-        unsafe { libc::dup2(devnull.as_raw_fd(), 2) };
+        let rc = unsafe { libc::dup2(devnull.as_raw_fd(), 2) };
+        if rc < 0 {
+            unsafe { libc::close(old_fd); }
+            return None;
+        }
         Some(Self { old_fd })
     }
 }
