@@ -9,6 +9,7 @@ use std::sync::Mutex;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(MobiCache(Mutex::new(HashMap::new())))
         .manage(ConvertCancel(AtomicBool::new(false)))
         .invoke_handler(tauri::generate_handler![

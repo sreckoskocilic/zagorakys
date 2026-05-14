@@ -36,7 +36,7 @@ interface MobiPage {
 
 function App() {
   const [comicPath, setComicPath] = useState("");
-  const [outputDir, setOutputDir] = useState("");
+  const [outputDir, setOutputDir] = useState(() => localStorage.getItem("zagorakys-outputdir") || "");
   const [quality, setQuality] = useState(() => {
     const v = localStorage.getItem("zagorakys-quality");
     return v ? Number(v) : 20;
@@ -57,6 +57,7 @@ function App() {
   const [showBatchSummary, setShowBatchSummary] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [skipExisting, setSkipExisting] = useState(() => localStorage.getItem("zagorakys-skip") === "true");
+  const [hideCover, setHideCover] = useState(() => localStorage.getItem("zagorakys-hidecover") === "true");
   const cancelRef = useRef(false);
 
   const [mobiPath, setMobiPath] = useState("");
@@ -88,6 +89,8 @@ function App() {
   useEffect(() => { localStorage.setItem("zagorakys-contrast", String(contrast)); }, [contrast]);
   useEffect(() => { localStorage.setItem("zagorakys-nosplit", String(noSplit)); }, [noSplit]);
   useEffect(() => { localStorage.setItem("zagorakys-skip", String(skipExisting)); }, [skipExisting]);
+  useEffect(() => { localStorage.setItem("zagorakys-hidecover", String(hideCover)); }, [hideCover]);
+  useEffect(() => { localStorage.setItem("zagorakys-outputdir", outputDir); }, [outputDir]);
 
   useEffect(() => {
     invoke<string>("get_version").then(setVersion);
@@ -407,20 +410,7 @@ function App() {
           </button>
 
           {comicPath && !isBatch && (
-            <div className="selected-file" title={comicPath}>{fileName(comicPath)}</div>
-          )}
-
-          {isBatch && !converting && !showBatchSummary && (
-            <div className="batch-file-preview">
-              <span className="batch-preview-label">{batchFiles.length} files</span>
-              <div className="batch-file-list">
-                {batchFiles.map((f, i) => (
-                  <div key={i} className="batch-file-item">
-                    <span className="batch-file-name" title={f}>{fileName(f)}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <div className="selected-file" />
           )}
 
           <button
@@ -523,6 +513,19 @@ function App() {
           <button className="sidebar-btn" onClick={openMobi}>
             Open Book
           </button>
+
+          {isBatch && !converting && !showBatchSummary && (
+            <div className="batch-file-preview">
+              <span className="batch-preview-label">{batchFiles.length} files</span>
+              <div className="batch-file-list">
+                {batchFiles.map((f, i) => (
+                  <div key={i} className="batch-file-item">
+                    <span className="batch-file-name" title={f}>{fileName(f)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {error && <div className="msg error">{error}</div>}
@@ -548,13 +551,17 @@ function App() {
               <div className="setting-group">
                 <span className="setting-group-label">Conversion</span>
                 <label className="checkbox-label">
-                  Quality: {quality}
+                  Quality:
                   <input
-                    type="range"
+                    type="number"
+                    className="quality-input"
                     min={1}
                     max={100}
                     value={quality}
-                    onChange={(e) => setQuality(Number(e.target.value))}
+                    onChange={(e) => {
+                      const v = Math.max(1, Math.min(100, Number(e.target.value) || 1));
+                      setQuality(v);
+                    }}
                   />
                 </label>
                 <label className="checkbox-label">
@@ -582,6 +589,14 @@ function App() {
                     onChange={(e) => setSkipExisting(e.target.checked)}
                   />
                   Skip already converted
+                </label>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={hideCover}
+                    onChange={(e) => setHideCover(e.target.checked)}
+                  />
+                  Hide Kindle frame
                 </label>
               </div>
 
@@ -646,26 +661,26 @@ function App() {
             </div>
             <div className={`preview-image-container${zoom > 1 ? " zoomed" : ""}`}>
               <div className="kindle-frame" style={zoom !== 1 ? { transform: `scale(${zoom})`, transformOrigin: zoom > 1 ? '0 0' : 'center center' } : undefined}>
-                <div className="kindle-bezel">
-                  <span className="kindle-label">Kindle</span>
-                  <div className="kindle-screen">
-                    <img
-                      src={pageImage}
-                      alt={`Page ${currentPage + 1}`}
-                      className={loadingPage ? "loading" : ""}
-                    />
+                {hideCover ? (
+                  <img
+                    src={pageImage}
+                    alt={`Page ${currentPage + 1}`}
+                    className={`preview-bare${loadingPage ? " loading" : ""}`}
+                  />
+                ) : (
+                  <div className="kindle-bezel">
+                    <span className="kindle-label">Kindle</span>
+                    <div className="kindle-screen">
+                      <img
+                        src={pageImage}
+                        alt={`Page ${currentPage + 1}`}
+                        className={loadingPage ? "loading" : ""}
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             </div>
-            {mobiInfo && (
-              <div className="preview-status">
-                <span className="status-title">{mobiInfo.title || fileName(mobiPath)}</span>
-                {mobiInfo.author && mobiInfo.author !== "kindling" && <span className="status-author">{mobiInfo.author}</span>}
-                <span className="status-meta">{mobiInfo.page_count} pages &middot; {mobiInfo.file_size}</span>
-                {(convertResult?.elapsed || batchElapsed) && <span className="status-meta">{convertResult?.elapsed || batchElapsed}</span>}
-              </div>
-            )}
           </>
         ) : (
           <div className="preview-empty">
@@ -673,6 +688,30 @@ function App() {
             <span className="preview-empty-hint">CBR, CBZ, RAR, ZIP, PDF</span>
           </div>
         )}
+        <div className="preview-status">
+          {mobiInfo ? (
+            <>
+              <span className="status-title">{shortPath(convertResult?.output_path || mobiPath)}&nbsp;&nbsp;&nbsp;&nbsp;[{mobiInfo.page_count} pages]</span>
+              {convertResult && !convertResult.skipped && !isBatch && convertResult.input_bytes > 0 ? (
+                <>
+                  <span className="status-meta">
+                    {convertResult.input_size} → {convertResult.output_size} (−{Math.round((1 - convertResult.output_bytes / convertResult.input_bytes) * 100)}%)
+                  </span>
+                  <span className="status-dict">
+                    {"{"}<em>Quality</em>{`: ${quality}, `}<em>Duration</em>{`: ${Math.round(parseFloat(convertResult.elapsed))}s}`}
+                  </span>
+                </>
+              ) : (
+                <span className="status-meta">{mobiInfo.file_size}</span>
+              )}
+            </>
+          ) : (comicPath || isBatch) ? (
+            <span className="status-title">
+              {isBatch ? shortPath(batchFiles[0].replace(/[/\\][^/\\]+$/, "")) : shortPath(comicPath)}
+              {isBatch && <>&nbsp;&nbsp;&nbsp;&nbsp;[{batchFiles.length} files]</>}
+            </span>
+          ) : null}
+        </div>
         {dragging && (
           <div className="drag-overlay">
             <div className="drag-overlay-content">Drop to convert</div>
@@ -685,6 +724,11 @@ function App() {
 
 function fileName(path: string): string {
   return path.split(/[/\\]/).pop() || path;
+}
+
+function shortPath(path: string): string {
+  const home = path.match(/^(\/Users\/[^/]+)/)?.[1];
+  return home ? "~" + path.slice(home.length) : path;
 }
 
 function formatBytes(bytes: number): string {

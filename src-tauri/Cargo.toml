@@ -21,9 +21,11 @@ base64 = "0.22"
 tempfile = "3"
 kindling = { git = "https://github.com/ciscoriordan/kindling", package = "kindling-mobi" }
 image = "0.25"
+rayon = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 libc = "0.2"
 walkdir = "2"
+tauri-plugin-window-state = "2"
 
 [profile.dev]
 opt-level = 0

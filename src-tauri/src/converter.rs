@@ -601,6 +601,48 @@ fn collect_rendered_images(dir: &Path) -> Result<usize, String> {
     Ok(count)
 }
 
+fn process_image(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+    contrast: bool,
+    grayscale: bool,
+    resize: bool,
+) -> Result<Vec<u8>, String> {
+    use image::imageops::FilterType;
+    use image::ImageReader;
+    use std::io::Cursor;
+
+    let img = ImageReader::new(Cursor::new(raw))
+        .with_guessed_format()
+        .map_err(|e| format!("Image format error: {e}"))?
+        .decode()
+        .map_err(|e| format!("Decode error: {e}"))?;
+
+    let img = if resize { img.resize(width, height, FilterType::CatmullRom) } else { img };
+    let img = if grayscale {
+        image::DynamicImage::ImageLuma8(img.to_luma8())
+    } else {
+        img
+    };
+    let img = if contrast {
+        if grayscale {
+            image::DynamicImage::ImageLuma8(image::imageops::contrast(&img.to_luma8(), 20.0))
+        } else {
+            image::DynamicImage::ImageRgba8(image::imageops::contrast(&img.to_rgba8(), 20.0))
+        }
+    } else {
+        img
+    };
+
+    let mut jpeg_buf = Cursor::new(Vec::new());
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
+    img.write_with_encoder(encoder)
+        .map_err(|e| format!("JPEG encode error: {e}"))?;
+    Ok(jpeg_buf.into_inner())
+}
+
 fn optimize_dir_to_cbz(
     dir: &Path,
     output_path: &Path,
@@ -613,9 +655,8 @@ fn optimize_dir_to_cbz(
     cancel: &AtomicBool,
     app: &AppHandle,
 ) -> Result<(), String> {
-    use image::imageops::FilterType;
-    use image::ImageReader;
-    use std::io::{Cursor, Write};
+    use rayon::prelude::*;
+    use std::io::Write;
 
     let mut images: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|e| format!("Cannot read directory: {e}"))?
@@ -636,51 +677,34 @@ fn optimize_dir_to_cbz(
     }
 
     let total = images.len();
+    emit_progress(app, 0, total, &format!("Processing 0/{total}"));
+
+    let raw_images: Vec<Vec<u8>> = images.iter()
+        .map(|p| fs::read(p).map_err(|e| format!("Cannot read image: {e}")))
+        .collect::<Result<_, _>>()?;
+
+    let processed: Vec<Result<Vec<u8>, String>> = raw_images.par_iter()
+        .map(|raw| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Cancelled".to_string());
+            }
+            process_image(raw, width, height, quality, contrast, grayscale, resize)
+        })
+        .collect();
+
     let out_file = fs::File::create(output_path).map_err(|e| format!("Cannot create output: {e}"))?;
     let mut zip_writer = zip::ZipWriter::new(out_file);
     let zip_options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+        .compression_method(zip::CompressionMethod::Stored);
 
-    for (i, img_path) in images.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            drop(zip_writer);
-            let _ = fs::remove_file(output_path);
-            return Err("Cancelled".to_string());
-        }
-        emit_progress(app, i, total, &format!("Processing {}/{total}", i + 1));
-
-        let img = ImageReader::open(img_path)
-            .map_err(|e| format!("Cannot open image: {e}"))?
-            .with_guessed_format()
-            .map_err(|e| format!("Image format error: {e}"))?
-            .decode()
-            .map_err(|e| format!("Decode error: {e}"))?;
-
-        let img = if resize { img.resize(width, height, FilterType::Lanczos3) } else { img };
-        let img = if grayscale {
-            image::DynamicImage::ImageLuma8(img.to_luma8())
-        } else {
-            img
-        };
-        let img = if contrast {
-            if grayscale {
-                image::DynamicImage::ImageLuma8(image::imageops::contrast(&img.to_luma8(), 20.0))
-            } else {
-                image::DynamicImage::ImageRgba8(image::imageops::contrast(&img.to_rgba8(), 20.0))
-            }
-        } else {
-            img
-        };
+    for (i, result) in processed.into_iter().enumerate() {
+        let jpeg_data = result?;
+        emit_progress(app, i + 1, total, &format!("Processing {}/{total}", i + 1));
 
         let out_name = format!("{:04}.jpg", i);
-        let mut jpeg_buf = Cursor::new(Vec::new());
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
-        img.write_with_encoder(encoder)
-            .map_err(|e| format!("JPEG encode error: {e}"))?;
-
         zip_writer.start_file(&out_name, zip_options)
             .map_err(|e| format!("ZIP write error: {e}"))?;
-        zip_writer.write_all(jpeg_buf.get_ref())
+        zip_writer.write_all(&jpeg_data)
             .map_err(|e| format!("ZIP write error: {e}"))?;
     }
 
@@ -711,8 +735,7 @@ fn optimize_cbz(
     cancel: &AtomicBool,
     app: &AppHandle,
 ) -> Result<(), String> {
-    use image::imageops::FilterType;
-    use image::ImageReader;
+    use rayon::prelude::*;
     use std::io::{Cursor, Read, Write};
 
     let archive_type = detect_archive_type(input_path);
@@ -779,52 +802,31 @@ fn optimize_cbz(
     }
 
     let total = entries.len();
+    emit_progress(app, 0, total, &format!("Processing 0/{total}"));
+
+    let processed: Vec<Result<(String, Vec<u8>), String>> = entries.par_iter()
+        .map(|(name, raw)| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Cancelled".to_string());
+            }
+            let jpeg_data = process_image(raw, width, height, quality, contrast, grayscale, resize)?;
+            let out_name = Path::new(name).with_extension("jpg").to_string_lossy().to_string();
+            Ok((out_name, jpeg_data))
+        })
+        .collect();
+
     let out_file = fs::File::create(output_path).map_err(|e| format!("Cannot create output: {e}"))?;
     let mut zip_writer = zip::ZipWriter::new(out_file);
     let zip_options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+        .compression_method(zip::CompressionMethod::Stored);
 
-    for (i, (name, raw)) in entries.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            drop(zip_writer);
-            let _ = fs::remove_file(output_path);
-            return Err("Cancelled".to_string());
-        }
-        emit_progress(app, i, total, &format!("Processing {}/{total}", i + 1));
-
-        let img = ImageReader::new(Cursor::new(raw))
-            .with_guessed_format()
-            .map_err(|e| format!("Image format error: {e}"))?
-            .decode()
-            .map_err(|e| format!("Decode error for {name}: {e}"))?;
-
-        let img = if resize { img.resize(width, height, FilterType::Lanczos3) } else { img };
-
-        let img = if grayscale {
-            image::DynamicImage::ImageLuma8(img.to_luma8())
-        } else {
-            img
-        };
-
-        let img = if contrast {
-            if grayscale {
-                image::DynamicImage::ImageLuma8(image::imageops::contrast(&img.to_luma8(), 20.0))
-            } else {
-                image::DynamicImage::ImageRgba8(image::imageops::contrast(&img.to_rgba8(), 20.0))
-            }
-        } else {
-            img
-        };
-
-        let out_name = Path::new(name).with_extension("jpg").to_string_lossy().to_string();
-        let mut jpeg_buf = Cursor::new(Vec::new());
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
-        img.write_with_encoder(encoder)
-            .map_err(|e| format!("JPEG encode error: {e}"))?;
+    for (i, result) in processed.into_iter().enumerate() {
+        let (out_name, jpeg_data) = result?;
+        emit_progress(app, i + 1, total, &format!("Processing {}/{total}", i + 1));
 
         zip_writer.start_file(&out_name, zip_options)
             .map_err(|e| format!("ZIP write error: {e}"))?;
-        zip_writer.write_all(jpeg_buf.get_ref())
+        zip_writer.write_all(&jpeg_data)
             .map_err(|e| format!("ZIP write error: {e}"))?;
     }
 
@@ -855,12 +857,12 @@ pub async fn convert_comic(
     let (dev_w, dev_h, dev_name) = device_profile(&options.device);
 
     let output_ext = if is_cbz_output(&options.device) { "cbz" } else { "mobi" };
-    let output_name = if options.device == "optimize" {
-        format!("{title}_optimized.{output_ext}")
+    let base_name = if options.device == "optimize" {
+        format!("{title}_optimized")
     } else {
-        format!("{title}.{output_ext}")
+        title.clone()
     };
-    let expected_output = output_dir.join(&output_name);
+    let expected_output = output_dir.join(format!("{base_name}.{output_ext}"));
 
     if options.skip_existing && expected_output.exists() {
         let output_bytes = fs::metadata(&expected_output).map(|m| m.len() as usize).unwrap_or(0);
@@ -876,6 +878,19 @@ pub async fn convert_comic(
             skipped: true,
         });
     }
+
+    let expected_output = if options.device == "optimize" && expected_output.exists() {
+        let mut counter = 1;
+        loop {
+            let candidate = output_dir.join(format!("{base_name}_{counter}.{output_ext}"));
+            if !candidate.exists() {
+                break candidate;
+            }
+            counter += 1;
+        }
+    } else {
+        expected_output
+    };
 
     cache.0.lock().unwrap().remove(&expected_output);
 
