@@ -43,7 +43,7 @@ jobs:
           RUSTC_WRAPPER: sccache
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'Zagorakys ${{ github.ref_name }}'
+          releaseName: '${{ github.ref_name }}'
           releaseBody: ''
           releaseDraft: false
           prerelease: false
