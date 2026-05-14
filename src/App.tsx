@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 interface ConvertResult {
   output_path: string;
@@ -68,6 +70,8 @@ function App() {
   const [loadingPage, setLoadingPage] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [version, setVersion] = useState("");
+  const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body: string } | null>(null);
+  const [updating, setUpdating] = useState(false);
   const [theme, setTheme] = useState(() => {
     const saved = localStorage.getItem("zagorakys-theme");
     return ["ember", "jade", "iris", "rose"].includes(saved ?? "") ? saved! : "ember";
@@ -95,6 +99,11 @@ function App() {
 
   useEffect(() => {
     invoke<string>("get_version").then(setVersion);
+    check().then((update) => {
+      if (update?.available) {
+        setUpdateAvailable({ version: update.version, body: update.body ?? "" });
+      }
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -627,7 +636,32 @@ function App() {
                 </select>
               </div>
 
-              {version && <span className="version-label">Zagorakys v{version}</span>}
+              {version && (
+                <div className="version-section">
+                  <span className="version-label">Zagorakys v{version}</span>
+                  {updateAvailable && (
+                    <button
+                      className="update-btn"
+                      disabled={updating}
+                      onClick={async () => {
+                        setUpdating(true);
+                        try {
+                          const update = await check();
+                          if (update?.available) {
+                            await update.downloadAndInstall();
+                            await relaunch();
+                          }
+                        } catch (e) {
+                          setError(String(e));
+                          setUpdating(false);
+                        }
+                      }}
+                    >
+                      {updating ? "Updating..." : `Update to v${updateAvailable.version}`}
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           )}
           <button
