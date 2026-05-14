@@ -26,7 +26,6 @@ fn is_cbz_output(device: &str) -> bool {
     device.starts_with("kobo") || device == "optimize"
 }
 
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConvertOptions {
     pub input_path: String,
@@ -610,6 +609,7 @@ fn optimize_dir_to_cbz(
     quality: u8,
     contrast: bool,
     grayscale: bool,
+    resize: bool,
     cancel: &AtomicBool,
     app: &AppHandle,
 ) -> Result<(), String> {
@@ -656,14 +656,18 @@ fn optimize_dir_to_cbz(
             .decode()
             .map_err(|e| format!("Decode error: {e}"))?;
 
-        let img = if width < 9999 { img.resize(width, height, FilterType::Lanczos3) } else { img };
+        let img = if resize { img.resize(width, height, FilterType::Lanczos3) } else { img };
         let img = if grayscale {
             image::DynamicImage::ImageLuma8(img.to_luma8())
         } else {
             img
         };
         let img = if contrast {
-            image::DynamicImage::ImageLuma8(image::imageops::contrast(&img.to_luma8(), 20.0))
+            if grayscale {
+                image::DynamicImage::ImageLuma8(image::imageops::contrast(&img.to_luma8(), 20.0))
+            } else {
+                image::DynamicImage::ImageRgba8(image::imageops::contrast(&img.to_rgba8(), 20.0))
+            }
         } else {
             img
         };
@@ -703,6 +707,7 @@ fn optimize_cbz(
     quality: u8,
     contrast: bool,
     grayscale: bool,
+    resize: bool,
     cancel: &AtomicBool,
     app: &AppHandle,
 ) -> Result<(), String> {
@@ -793,7 +798,7 @@ fn optimize_cbz(
             .decode()
             .map_err(|e| format!("Decode error for {name}: {e}"))?;
 
-        let img = if width < 9999 { img.resize(width, height, FilterType::Lanczos3) } else { img };
+        let img = if resize { img.resize(width, height, FilterType::Lanczos3) } else { img };
 
         let img = if grayscale {
             image::DynamicImage::ImageLuma8(img.to_luma8())
@@ -802,7 +807,11 @@ fn optimize_cbz(
         };
 
         let img = if contrast {
-            image::DynamicImage::ImageLuma8(image::imageops::contrast(&img.to_luma8(), 20.0))
+            if grayscale {
+                image::DynamicImage::ImageLuma8(image::imageops::contrast(&img.to_luma8(), 20.0))
+            } else {
+                image::DynamicImage::ImageRgba8(image::imageops::contrast(&img.to_rgba8(), 20.0))
+            }
         } else {
             img
         };
@@ -870,11 +879,13 @@ pub async fn convert_comic(
 
     cache.0.lock().unwrap().remove(&expected_output);
 
+    let is_optimize = options.device == "optimize";
     let quality = options.quality.clamp(1, 100);
     let input_bytes = fs::metadata(&input_path).map(|m| m.len() as usize).unwrap_or(0);
     let input_size = format_size(input_bytes);
 
-    emit_progress(&app, 0, 1, "Converting...");
+    let progress_verb = if is_optimize { "Optimizing" } else { "Converting" };
+    emit_progress(&app, 0, 1, &format!("{progress_verb}..."));
     let start = std::time::Instant::now();
 
     let ext = input_path
@@ -884,7 +895,8 @@ pub async fn convert_comic(
         .to_lowercase();
     let is_pdf = ext == "pdf";
 
-    let grayscale = options.device != "optimize";
+    let grayscale = !is_optimize;
+    let resize = !is_optimize;
     let output_path = if is_cbz_output(&options.device) {
         let cbz_path = expected_output.clone();
         if is_pdf {
@@ -892,9 +904,9 @@ pub async fn convert_comic(
                 .map_err(|e| format!("Cannot create temp dir: {e}"))?;
             emit_progress(&app, 0, 1, "Rendering PDF...");
             render_pdf_to_dir(&input_path, tmp_dir.path())?;
-            optimize_dir_to_cbz(tmp_dir.path(), &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, &cancel.0, &app)?;
+            optimize_dir_to_cbz(tmp_dir.path(), &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, resize, &cancel.0, &app)?;
         } else {
-            optimize_cbz(&input_path, &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, &cancel.0, &app)?;
+            optimize_cbz(&input_path, &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, resize, &cancel.0, &app)?;
         }
         cbz_path
     } else {
@@ -935,6 +947,10 @@ pub async fn convert_comic(
             .unwrap_or(0);
         if img_count == 0 {
             return Err("No images found".to_string());
+        }
+
+        if cancel.0.load(Ordering::Relaxed) {
+            return Err("Cancelled".to_string());
         }
 
         #[cfg(unix)]
@@ -1141,5 +1157,74 @@ mod tests {
 
         let images = extract_images_from_mobi(&mobi_path).unwrap();
         assert!(images.len() >= 4, "expected at least 4 images, got {}", images.len());
+    }
+
+    #[test]
+    fn extract_images_from_cbz_returns_sorted() {
+        let images = extract_images_from_cbz(&fixture_path()).unwrap();
+        assert!(images.len() >= 4, "expected at least 4 images, got {}", images.len());
+        for img in &images {
+            assert!(!img.is_empty());
+        }
+    }
+
+    #[test]
+    fn image_ext_detection() {
+        assert_eq!(image_ext_from_bytes(&[0xFF, 0xD8, 0xFF, 0xE0]), "jpg");
+        assert_eq!(image_ext_from_bytes(&[0x89, 0x50, 0x4E, 0x47]), "png");
+        assert_eq!(image_ext_from_bytes(b"GIF87a"), "gif");
+        assert_eq!(image_ext_from_bytes(b"GIF89a"), "gif");
+        assert_eq!(image_ext_from_bytes(&[0x42, 0x4D, 0x00]), "bmp");
+        assert_eq!(image_ext_from_bytes(b"GIF"), "jpg"); // too short = fallback
+        assert_eq!(image_ext_from_bytes(&[0x00]), "jpg"); // unknown = fallback
+    }
+
+    #[test]
+    fn device_profile_values() {
+        assert_eq!(device_profile("kindle4"), (600, 800, "kindle4"));
+        assert_eq!(device_profile("kindle-paperwhite"), (1072, 1448, "kindle_pw"));
+        assert_eq!(device_profile("kindle-oasis"), (1264, 1680, "kindle_oasis"));
+        assert_eq!(device_profile("kobo-clara-hd"), (1072, 1448, "kobo_clara_hd"));
+        assert_eq!(device_profile("optimize"), (9999, 9999, "optimized"));
+        assert_eq!(device_profile("unknown"), (600, 800, "kindle4"));
+    }
+
+    #[test]
+    fn is_cbz_output_logic() {
+        assert!(is_cbz_output("kobo-clara-hd"));
+        assert!(is_cbz_output("optimize"));
+        assert!(!is_cbz_output("kindle4"));
+        assert!(!is_cbz_output("kindle-paperwhite"));
+    }
+
+    #[test]
+    fn quality_clamp() {
+        assert_eq!(0u8.clamp(1, 100), 1);
+        assert_eq!(50u8.clamp(1, 100), 50);
+        assert_eq!(100u8.clamp(1, 100), 100);
+        assert_eq!(255u8.clamp(1, 100), 100);
+    }
+
+    #[test]
+    fn mobi_metadata_too_small() {
+        let (title, author) = extract_mobi_metadata(&[0u8; 10]);
+        assert!(author.is_empty());
+        assert!(title.is_empty() || title.chars().all(|c| c == '\0'));
+    }
+
+    #[test]
+    fn mobi_data_too_small() {
+        let result = extract_images_from_mobi_data(&[0u8; 10]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn format_size_zero() {
+        assert_eq!(format_size(0), "0 B");
+    }
+
+    #[test]
+    fn format_size_large() {
+        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2048.0 MB");
     }
 }

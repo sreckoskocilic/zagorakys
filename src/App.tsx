@@ -226,7 +226,8 @@ function App() {
         loadMobi(result.output_path);
       }
     } catch (e) {
-      setError(String(e));
+      const msg = String(e);
+      if (!msg.includes("Cancelled")) setError(msg);
     }
     setConverting(false);
     setProgress(null);
@@ -529,56 +530,8 @@ function App() {
         <div className="sidebar-bottom">
           {showSettings && (
             <div className="settings-panel">
-              <div className="setting-row">
-                <button className="setting-btn" onClick={selectOutputDir}>
-                  Output Folder
-                </button>
-                <span className="filepath">
-                  {outputDir || "Same as input"}
-                </span>
-              </div>
-
-              <label className="checkbox-label">
-                Quality: {quality}
-                <input
-                  type="range"
-                  min={1}
-                  max={100}
-                  value={quality}
-                  onChange={(e) => setQuality(Number(e.target.value))}
-                />
-              </label>
-
-              <label className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={contrast}
-                  onChange={(e) => setContrast(e.target.checked)}
-                />
-                Enhance contrast
-              </label>
-
-              {!device.startsWith("kobo") && device !== "optimize" && (
-              <label className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={noSplit}
-                  onChange={(e) => setNoSplit(e.target.checked)}
-                />
-                Don't split double pages
-              </label>
-              )}
-
-              <label className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={skipExisting}
-                  onChange={(e) => setSkipExisting(e.target.checked)}
-                />
-                Skip already converted
-              </label>
-
-              <div className="setting-row">
+              <div className="setting-group">
+                <span className="setting-group-label">Device</span>
                 <select
                   className="theme-select"
                   value={device}
@@ -592,7 +545,58 @@ function App() {
                 </select>
               </div>
 
-              <div className="setting-row">
+              <div className="setting-group">
+                <span className="setting-group-label">Conversion</span>
+                <label className="checkbox-label">
+                  Quality: {quality}
+                  <input
+                    type="range"
+                    min={1}
+                    max={100}
+                    value={quality}
+                    onChange={(e) => setQuality(Number(e.target.value))}
+                  />
+                </label>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={contrast}
+                    onChange={(e) => setContrast(e.target.checked)}
+                  />
+                  Enhance contrast
+                </label>
+                {!device.startsWith("kobo") && device !== "optimize" && (
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={noSplit}
+                    onChange={(e) => setNoSplit(e.target.checked)}
+                  />
+                  Don't split double pages
+                </label>
+                )}
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={skipExisting}
+                    onChange={(e) => setSkipExisting(e.target.checked)}
+                  />
+                  Skip already converted
+                </label>
+              </div>
+
+              <div className="setting-group">
+                <span className="setting-group-label">Output</span>
+                <button className="setting-btn" onClick={selectOutputDir}>
+                  Output Folder
+                </button>
+                <span className="filepath">
+                  {outputDir || "Same as input"}
+                </span>
+              </div>
+
+              <div className="setting-group">
+                <span className="setting-group-label">Theme</span>
                 <select
                   className="theme-select"
                   value={theme}
