@@ -41,7 +41,8 @@ function App() {
   const [outputDir, setOutputDir] = useState(() => localStorage.getItem("zagorakys-outputdir") || "");
   const [quality, setQuality] = useState(() => {
     const v = localStorage.getItem("zagorakys-quality");
-    return v ? Number(v) : 20;
+    const n = v ? Number(v) : 20;
+    return (!n || n < 1) ? 20 : Math.min(100, n);
   });
   const [contrast, setContrast] = useState(() => localStorage.getItem("zagorakys-contrast") === "true");
   const [converting, setConverting] = useState(false);

@@ -425,13 +425,14 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
 
         if !status.success() {
             let retry = std::process::Command::new(&unrar)
-                .args(["e", "-o+", "-inul", "--"])
+                .args(["e", "-o+", "--"])
                 .arg(input_path)
                 .arg(dest_dir)
-                .status()
+                .output()
                 .map_err(|e| format!("Failed to run unrar: {e}"))?;
-            if !retry.success() {
-                return Err("unrar failed to extract archive".to_string());
+            if !retry.status.success() {
+                let stderr = String::from_utf8_lossy(&retry.stderr);
+                return Err(format!("unrar failed: {}", stderr.trim()));
             }
         }
 
@@ -537,7 +538,7 @@ fn find_unrar() -> Option<PathBuf> {
     };
     for c in candidates {
         let p = PathBuf::from(&c);
-        if p.exists() {
+        if p.is_absolute() && p.exists() {
             return Some(p);
         }
         if std::process::Command::new(&c)
@@ -620,7 +621,7 @@ fn find_tool(candidates: &[&str]) -> Option<PathBuf> {
 
     for &name in candidates {
         let p = PathBuf::from(name);
-        if p.exists() {
+        if p.is_absolute() && p.exists() {
             return Some(p);
         }
         if std::process::Command::new(name)
@@ -658,9 +659,20 @@ fn collect_rendered_images(dir: &Path) -> Result<usize, String> {
     let count = images.len();
     for (i, img_path) in images.iter().enumerate() {
         let ext = img_path.extension().and_then(|e| e.to_str()).unwrap_or("png");
-        let new_path = dir.join(format!("{:04}.{ext}", i));
-        if *img_path != new_path {
-            let _ = fs::rename(img_path, &new_path);
+        let tmp_name = format!("__tmp_{:04}.{ext}", i);
+        let _ = fs::rename(img_path, dir.join(&tmp_name));
+    }
+    for i in 0..count {
+        let pattern = format!("__tmp_{:04}.", i);
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(&pattern) {
+                    let ext = entry.path().extension().and_then(|e| e.to_str()).unwrap_or("png").to_string();
+                    let _ = fs::rename(entry.path(), dir.join(format!("{:04}.{ext}", i)));
+                    break;
+                }
+            }
         }
     }
     Ok(count)

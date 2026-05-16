@@ -27,6 +27,7 @@ The converted file shows up in the preview — flip through pages to check it lo
 - **Output Folder** — change where output gets saved (default: same folder as input)
 - **Enhance contrast** — bumps up contrast for e-ink screens
 - **Don't split double pages** — keeps wide two-page spreads as single pages
+- **Preserve color** — keep original colors when optimizing (default: grayscale)
 - **Skip already converted** — skip files that already have output in the target folder
 - **Hide Kindle frame** — show pages without the decorative Kindle bezel
 - **Theme** — Ember, Jade, Iris, or Rose
