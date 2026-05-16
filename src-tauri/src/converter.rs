@@ -17,7 +17,7 @@ fn device_profile(device: &str) -> (u32, u32, &'static str) {
         "kobo-clara-hd" => (1072, 1448, "kobo_clara_hd"),
         "kindle-paperwhite" => (1072, 1448, "kindle_pw"),
         "kindle-oasis" => (1264, 1680, "kindle_oasis"),
-        "optimize" => (9999, 9999, "optimized"),
+        "optimize" => (2048, 2048, "optimized"),
         _ => (600, 800, "kindle4"),
     }
 }
@@ -235,7 +235,7 @@ fn extract_images_from_cbz(path: &Path) -> Result<Vec<Vec<u8>>, String> {
             let file = archive.by_index(i).ok()?;
             let name = file.name().to_string();
             let lower = name.to_lowercase();
-            if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".webp") {
+            if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".webp") || lower.ends_with(".bmp") {
                 Some(name)
             } else {
                 None
@@ -386,6 +386,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
                     || lower.ends_with(".jpeg")
                     || lower.ends_with(".png")
                     || lower.ends_with(".webp")
+                    || lower.ends_with(".bmp")
                 {
                     Some(name)
                 } else {
@@ -441,7 +442,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
             .filter_map(|e| {
                 let path = e.ok()?.path();
                 let ext = path.extension()?.to_str()?.to_lowercase();
-                if ["jpg", "jpeg", "png", "webp"].contains(&ext.as_str()) {
+                if ["jpg", "jpeg", "png", "webp", "bmp"].contains(&ext.as_str()) {
                     Some(path)
                 } else {
                     None
@@ -462,6 +463,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
                         let lower = line.to_lowercase();
                         if lower.ends_with(".jpg") || lower.ends_with(".jpeg")
                             || lower.ends_with(".png") || lower.ends_with(".webp")
+                            || lower.ends_with(".bmp")
                         {
                             Path::new(line).file_name()
                                 .map(|n| n.to_string_lossy().to_string())
@@ -678,8 +680,18 @@ fn collect_rendered_images(dir: &Path) -> Result<usize, String> {
     Ok(count)
 }
 
-fn process_image(
-    raw: &[u8],
+fn decode_image(raw: &[u8]) -> Result<image::DynamicImage, String> {
+    use image::ImageReader;
+    use std::io::Cursor;
+    ImageReader::new(Cursor::new(raw))
+        .with_guessed_format()
+        .map_err(|e| format!("Image format error: {e}"))?
+        .decode()
+        .map_err(|e| format!("Decode error: {e}"))
+}
+
+fn encode_image(
+    img: image::DynamicImage,
     width: u32,
     height: u32,
     quality: u8,
@@ -688,16 +700,14 @@ fn process_image(
     resize: bool,
 ) -> Result<Vec<u8>, String> {
     use image::imageops::FilterType;
-    use image::ImageReader;
     use std::io::Cursor;
 
-    let img = ImageReader::new(Cursor::new(raw))
-        .with_guessed_format()
-        .map_err(|e| format!("Image format error: {e}"))?
-        .decode()
-        .map_err(|e| format!("Decode error: {e}"))?;
-
-    let img = if resize { img.resize(width, height, FilterType::CatmullRom) } else { img };
+    let filter = if width >= 2048 { FilterType::Triangle } else { FilterType::CatmullRom };
+    let img = if resize && (img.width() > width || img.height() > height) {
+        img.resize(width, height, filter)
+    } else {
+        img
+    };
     let img = if grayscale {
         image::DynamicImage::ImageLuma8(img.to_luma8())
     } else {
@@ -720,6 +730,29 @@ fn process_image(
     Ok(jpeg_buf.into_inner())
 }
 
+fn process_image_split(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+    contrast: bool,
+    grayscale: bool,
+    resize: bool,
+    split: bool,
+) -> Result<Vec<Vec<u8>>, String> {
+    let img = decode_image(raw)?;
+    let (w, h) = (img.width(), img.height());
+    let pages = if split && w > h * 5 / 4 {
+        let mid = w / 2;
+        vec![img.crop_imm(0, 0, mid, h), img.crop_imm(mid, 0, w - mid, h)]
+    } else {
+        vec![img]
+    };
+    pages.into_iter()
+        .map(|page| encode_image(page, width, height, quality, contrast, grayscale, resize))
+        .collect()
+}
+
 fn optimize_dir_to_cbz(
     dir: &Path,
     output_path: &Path,
@@ -729,6 +762,7 @@ fn optimize_dir_to_cbz(
     contrast: bool,
     grayscale: bool,
     resize: bool,
+    split: bool,
     cancel: &AtomicBool,
     app: &AppHandle,
 ) -> Result<(), String> {
@@ -740,7 +774,7 @@ fn optimize_dir_to_cbz(
         .filter_map(|e| {
             let path = e.ok()?.path();
             let ext = path.extension()?.to_str()?.to_lowercase();
-            if ["jpg", "jpeg", "png", "webp", "ppm"].contains(&ext.as_str()) {
+            if ["jpg", "jpeg", "png", "webp", "ppm", "bmp"].contains(&ext.as_str()) {
                 Some(path)
             } else {
                 None
@@ -760,12 +794,12 @@ fn optimize_dir_to_cbz(
         .map(|p| fs::read(p).map_err(|e| format!("Cannot read image: {e}")))
         .collect::<Result<_, _>>()?;
 
-    let processed: Vec<Result<Vec<u8>, String>> = raw_images.par_iter()
+    let processed: Vec<Result<Vec<Vec<u8>>, String>> = raw_images.par_iter()
         .map(|raw| {
             if cancel.load(Ordering::Relaxed) {
                 return Err("Cancelled".to_string());
             }
-            process_image(raw, width, height, quality, contrast, grayscale, resize)
+            process_image_split(raw, width, height, quality, contrast, grayscale, resize, split)
         })
         .collect();
 
@@ -774,15 +808,18 @@ fn optimize_dir_to_cbz(
     let zip_options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored);
 
+    let mut page_idx = 0;
     for (i, result) in processed.into_iter().enumerate() {
-        let jpeg_data = result?;
+        let pages = result?;
         emit_progress(app, i + 1, total, &format!("Processing {}/{total}", i + 1));
-
-        let out_name = format!("{:04}.jpg", i);
-        zip_writer.start_file(&out_name, zip_options)
-            .map_err(|e| format!("ZIP write error: {e}"))?;
-        zip_writer.write_all(&jpeg_data)
-            .map_err(|e| format!("ZIP write error: {e}"))?;
+        for jpeg_data in pages {
+            let out_name = format!("{:04}.jpg", page_idx);
+            zip_writer.start_file(&out_name, zip_options)
+                .map_err(|e| format!("ZIP write error: {e}"))?;
+            zip_writer.write_all(&jpeg_data)
+                .map_err(|e| format!("ZIP write error: {e}"))?;
+            page_idx += 1;
+        }
     }
 
     zip_writer.finish().map_err(|e| format!("ZIP finalize error: {e}"))?;
@@ -809,6 +846,7 @@ fn optimize_cbz(
     contrast: bool,
     grayscale: bool,
     resize: bool,
+    split: bool,
     cancel: &AtomicBool,
     app: &AppHandle,
 ) -> Result<(), String> {
@@ -829,7 +867,7 @@ fn optimize_cbz(
                 let file = archive.by_index(i).ok()?;
                 let name = file.name().to_string();
                 let lower = name.to_lowercase();
-                if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".webp") {
+                if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".webp") || lower.ends_with(".bmp") {
                     Some(name)
                 } else {
                     None
@@ -855,7 +893,7 @@ fn optimize_cbz(
             .filter_map(|e| {
                 let path = e.ok()?.path();
                 let ext = path.extension()?.to_str()?.to_lowercase();
-                if ["jpg", "jpeg", "png", "webp"].contains(&ext.as_str()) {
+                if ["jpg", "jpeg", "png", "webp", "bmp"].contains(&ext.as_str()) {
                     Some(path)
                 } else {
                     None
@@ -880,12 +918,12 @@ fn optimize_cbz(
     let total = entries.len();
     emit_progress(app, 0, total, &format!("Processing 0/{total}"));
 
-    let processed: Vec<Result<Vec<u8>, String>> = entries.par_iter()
+    let processed: Vec<Result<Vec<Vec<u8>>, String>> = entries.par_iter()
         .map(|(_name, raw)| {
             if cancel.load(Ordering::Relaxed) {
                 return Err("Cancelled".to_string());
             }
-            process_image(raw, width, height, quality, contrast, grayscale, resize)
+            process_image_split(raw, width, height, quality, contrast, grayscale, resize, split)
         })
         .collect();
 
@@ -894,15 +932,18 @@ fn optimize_cbz(
     let zip_options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored);
 
+    let mut page_idx = 0;
     for (i, result) in processed.into_iter().enumerate() {
-        let jpeg_data = result?;
+        let pages = result?;
         emit_progress(app, i + 1, total, &format!("Processing {}/{total}", i + 1));
-
-        let out_name = format!("{:04}.jpg", i);
-        zip_writer.start_file(&out_name, zip_options)
-            .map_err(|e| format!("ZIP write error: {e}"))?;
-        zip_writer.write_all(&jpeg_data)
-            .map_err(|e| format!("ZIP write error: {e}"))?;
+        for jpeg_data in pages {
+            let out_name = format!("{:04}.jpg", page_idx);
+            zip_writer.start_file(&out_name, zip_options)
+                .map_err(|e| format!("ZIP write error: {e}"))?;
+            zip_writer.write_all(&jpeg_data)
+                .map_err(|e| format!("ZIP write error: {e}"))?;
+            page_idx += 1;
+        }
     }
 
     zip_writer.finish().map_err(|e| format!("ZIP finalize error: {e}"))?;
@@ -989,7 +1030,7 @@ pub async fn convert_comic(
     let is_pdf = ext == "pdf";
 
     let grayscale = if is_optimize { !options.preserve_color } else { true };
-    let resize = !is_optimize;
+    let resize = true;
     let output_path = if is_cbz_output(&options.device) {
         let cbz_path = expected_output.clone();
         if is_pdf {
@@ -997,10 +1038,10 @@ pub async fn convert_comic(
                 .map_err(|e| format!("Cannot create temp dir: {e}"))?;
             emit_progress(&app, 0, 1, "Rendering PDF...");
             render_pdf_to_dir(&input_path, tmp_dir.path())?;
-            optimize_dir_to_cbz(tmp_dir.path(), &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, resize, &cancel.0, &app)
+            optimize_dir_to_cbz(tmp_dir.path(), &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, resize, !options.no_split, &cancel.0, &app)
                 .map_err(|e| { let _ = fs::remove_file(&cbz_path); e })?;
         } else {
-            optimize_cbz(&input_path, &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, resize, &cancel.0, &app)
+            optimize_cbz(&input_path, &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, resize, !options.no_split, &cancel.0, &app)
                 .map_err(|e| { let _ = fs::remove_file(&cbz_path); e })?;
         }
         cbz_path
@@ -1040,7 +1081,7 @@ pub async fn convert_comic(
         let img_count = fs::read_dir(tmp_dir.path())
             .map(|rd| rd.filter_map(|e| {
                 let ext = e.ok()?.path().extension()?.to_str()?.to_lowercase();
-                ["jpg", "jpeg", "png", "webp", "ppm"].contains(&ext.as_str()).then_some(())
+                ["jpg", "jpeg", "png", "webp", "ppm", "bmp"].contains(&ext.as_str()).then_some(())
             }).count())
             .unwrap_or(0);
         if img_count == 0 {
