@@ -59,6 +59,7 @@ function App() {
   const [showBatchSummary, setShowBatchSummary] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [skipExisting, setSkipExisting] = useState(() => localStorage.getItem("zagorakys-skip") === "true");
+  const [preserveColor, setPreserveColor] = useState(() => localStorage.getItem("zagorakys-preserve-color") === "true");
   const [hideCover, setHideCover] = useState(() => localStorage.getItem("zagorakys-hidecover") === "true");
   const cancelRef = useRef(false);
   const pageRequestId = useRef(0);
@@ -94,6 +95,7 @@ function App() {
   useEffect(() => { localStorage.setItem("zagorakys-contrast", String(contrast)); }, [contrast]);
   useEffect(() => { localStorage.setItem("zagorakys-nosplit", String(noSplit)); }, [noSplit]);
   useEffect(() => { localStorage.setItem("zagorakys-skip", String(skipExisting)); }, [skipExisting]);
+  useEffect(() => { localStorage.setItem("zagorakys-preserve-color", String(preserveColor)); }, [preserveColor]);
   useEffect(() => { localStorage.setItem("zagorakys-hidecover", String(hideCover)); }, [hideCover]);
   useEffect(() => { localStorage.setItem("zagorakys-outputdir", outputDir); }, [outputDir]);
 
@@ -267,6 +269,7 @@ function App() {
           no_split: noSplit,
           device,
           skip_existing: skipExisting,
+          preserve_color: preserveColor,
         },
       });
       setConvertResult(result);
@@ -327,6 +330,7 @@ function App() {
             no_split: noSplit,
             device,
             skip_existing: skipExisting,
+            preserve_color: preserveColor,
           },
         });
         results.push(result);
@@ -339,7 +343,10 @@ function App() {
       }
     }
     const secs = (Date.now() - start) / 1000;
-    setBatchElapsed(secs >= 60 ? `${Math.floor(secs / 60)}m ${(secs % 60).toFixed(1)}s` : `${secs.toFixed(1)}s`);
+    const totalSecs = Math.floor(secs);
+    const mm = Math.floor(totalSecs / 60);
+    const ss = totalSecs % 60;
+    setBatchElapsed(`${mm}:${String(ss).padStart(2, "0")}`);
     setConverting(false);
     setProgress(null);
     if (results.length > 0 || errors.length > 0) {
@@ -469,7 +476,7 @@ function App() {
             return (
             <div className="batch-summary">
               <div className="batch-summary-header">
-                <span className="batch-summary-title">Batch Complete</span>
+                <span className="batch-summary-title">Batch Complete in {batchElapsed}</span>
                 <button className="batch-summary-close" onClick={() => setShowBatchSummary(false)}>&times;</button>
               </div>
               <div className="batch-summary-stats">
@@ -489,18 +496,13 @@ function App() {
                     <span className="batch-stat-label">failed</span>
                   </div>
                 )}
+                {converted.length > 0 && (
                 <div className="batch-stat">
-                  <span className="batch-stat-value">{batchElapsed}</span>
-                  <span className="batch-stat-label">elapsed</span>
+                  <span className="batch-stat-value">{formatBytes(converted.reduce((s, r) => s + r.input_bytes, 0))} → {formatBytes(converted.reduce((s, r) => s + r.output_bytes, 0))}</span>
+                  <span className="batch-stat-label">compression</span>
                 </div>
+                )}
               </div>
-              {converted.length > 0 && (
-                <div className="batch-summary-sizes">
-                  {formatBytes(converted.reduce((s, r) => s + r.input_bytes, 0))}
-                  {" → "}
-                  {formatBytes(converted.reduce((s, r) => s + r.output_bytes, 0))}
-                </div>
-              )}
               <div className="batch-file-list">
                 {batchResults.map((r, i) => (
                   <div key={i} className={`batch-file-item ${r.skipped ? "batch-file-skip" : "batch-file-ok"}`}>
@@ -597,6 +599,16 @@ function App() {
                     onChange={(e) => setNoSplit(e.target.checked)}
                   />
                   Don't split double pages
+                </label>
+                )}
+                {device === "optimize" && (
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={preserveColor}
+                    onChange={(e) => setPreserveColor(e.target.checked)}
+                  />
+                  Preserve color
                 </label>
                 )}
                 <label className="checkbox-label">
@@ -775,8 +787,8 @@ function shortPath(path: string): string {
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)} MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 

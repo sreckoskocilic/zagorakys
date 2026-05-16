@@ -36,6 +36,8 @@ pub struct ConvertOptions {
     pub device: String,
     #[serde(default)]
     pub skip_existing: bool,
+    #[serde(default)]
+    pub preserve_color: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -228,7 +230,7 @@ fn extract_images_from_cbz(path: &Path) -> Result<Vec<Vec<u8>>, String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&data))
         .map_err(|e| format!("Cannot open CBZ: {e}"))?;
 
-    let mut names: Vec<String> = (0..archive.len())
+    let names: Vec<String> = (0..archive.len())
         .filter_map(|i| {
             let file = archive.by_index(i).ok()?;
             let name = file.name().to_string();
@@ -240,7 +242,6 @@ fn extract_images_from_cbz(path: &Path) -> Result<Vec<Vec<u8>>, String> {
             }
         })
         .collect();
-    names.sort();
 
     let mut images = Vec::new();
     for name in &names {
@@ -376,7 +377,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&data))
             .map_err(|e| format!("Cannot open CBZ: {e}"))?;
 
-        let mut names: Vec<String> = (0..archive.len())
+        let names: Vec<String> = (0..archive.len())
             .filter_map(|i| {
                 let file = archive.by_index(i).ok()?;
                 let name = file.name().to_string();
@@ -392,7 +393,6 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
                 }
             })
             .collect();
-        names.sort();
 
         let mut count = 0;
         for name in &names {
@@ -447,7 +447,32 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
                 }
             })
             .collect();
-        images.sort();
+
+        // Sort by archive listing order (unrar lb preserves source order)
+        if let Ok(list_output) = std::process::Command::new(&unrar)
+            .args(["lb", "--"])
+            .arg(input_path)
+            .output()
+        {
+            let archive_order: Vec<String> = String::from_utf8_lossy(&list_output.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let lower = line.to_lowercase();
+                    if lower.ends_with(".jpg") || lower.ends_with(".jpeg")
+                        || lower.ends_with(".png") || lower.ends_with(".webp")
+                    {
+                        Path::new(line).file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            images.sort_by_key(|p| {
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                archive_order.iter().position(|n| *n == name).unwrap_or(usize::MAX)
+            });
+        }
 
         let count = images.len();
         for (i, img_path) in images.iter().enumerate() {
@@ -772,7 +797,7 @@ fn optimize_cbz(
         let reader = zip::ZipArchive::new(Cursor::new(&data))
             .map_err(|e| format!("Cannot open archive: {e}"))?;
         let mut archive = reader;
-        let mut names: Vec<String> = (0..archive.len())
+        let names: Vec<String> = (0..archive.len())
             .filter_map(|i| {
                 let file = archive.by_index(i).ok()?;
                 let name = file.name().to_string();
@@ -784,7 +809,6 @@ fn optimize_cbz(
                 }
             })
             .collect();
-        names.sort();
 
         for name in &names {
             let mut file = archive.by_name(name).map_err(|e| format!("Cannot read {name}: {e}"))?;
@@ -942,7 +966,7 @@ pub async fn convert_comic(
         .to_lowercase();
     let is_pdf = ext == "pdf";
 
-    let grayscale = !is_optimize;
+    let grayscale = if is_optimize { !options.preserve_color } else { true };
     let resize = !is_optimize;
     let output_path = if is_cbz_output(&options.device) {
         let cbz_path = expected_output.clone();
@@ -1224,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_images_from_cbz_returns_sorted() {
+    fn extract_images_from_cbz_preserves_order() {
         let images = extract_images_from_cbz(&fixture_path()).unwrap();
         assert!(images.len() >= 4, "expected at least 4 images, got {}", images.len());
         for img in &images {
