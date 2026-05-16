@@ -425,7 +425,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
 
         if !status.success() {
             let retry = std::process::Command::new(&unrar)
-                .args(["e", "-o+", "--"])
+                .args(["e", "-o+", "-inul", "--"])
                 .arg(input_path)
                 .arg(dest_dir)
                 .status()
@@ -454,33 +454,48 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
             .arg(input_path)
             .output()
         {
-            let archive_order: Vec<String> = String::from_utf8_lossy(&list_output.stdout)
-                .lines()
-                .filter_map(|line| {
-                    let lower = line.to_lowercase();
-                    if lower.ends_with(".jpg") || lower.ends_with(".jpeg")
-                        || lower.ends_with(".png") || lower.ends_with(".webp")
-                    {
-                        Path::new(line).file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            images.sort_by_key(|p| {
-                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-                archive_order.iter().position(|n| *n == name).unwrap_or(usize::MAX)
-            });
+            if list_output.status.success() {
+                let archive_order: HashMap<String, usize> = String::from_utf8_lossy(&list_output.stdout)
+                    .lines()
+                    .filter_map(|line| {
+                        let lower = line.to_lowercase();
+                        if lower.ends_with(".jpg") || lower.ends_with(".jpeg")
+                            || lower.ends_with(".png") || lower.ends_with(".webp")
+                        {
+                            Path::new(line).file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .enumerate()
+                    .map(|(i, name)| (name, i))
+                    .collect();
+                images.sort_by_key(|p| {
+                    let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    *archive_order.get(&name).unwrap_or(&usize::MAX)
+                });
+            }
         }
 
         let count = images.len();
+        // Two-phase rename to avoid collisions when source names overlap with target {:04} names
         for (i, img_path) in images.iter().enumerate() {
             let ext = img_path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
-            let new_name = format!("{:04}.{ext}", i);
-            let new_path = dest_dir.join(&new_name);
-            if *img_path != new_path {
-                let _ = fs::rename(img_path, &new_path);
+            let tmp_name = format!("__tmp_{:04}.{ext}", i);
+            let _ = fs::rename(img_path, dest_dir.join(&tmp_name));
+        }
+        for i in 0..count {
+            let pattern = format!("__tmp_{:04}.", i);
+            if let Ok(entries) = fs::read_dir(dest_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with(&pattern) {
+                        let ext = entry.path().extension().and_then(|e| e.to_str()).unwrap_or("jpg").to_string();
+                        let _ = fs::rename(entry.path(), dest_dir.join(format!("{:04}.{ext}", i)));
+                        break;
+                    }
+                }
             }
         }
         Ok(count)
@@ -853,18 +868,12 @@ fn optimize_cbz(
     let total = entries.len();
     emit_progress(app, 0, total, &format!("Processing 0/{total}"));
 
-    let processed: Vec<Result<(String, Vec<u8>), String>> = entries.par_iter()
-        .enumerate()
-        .map(|(i, (name, raw))| {
+    let processed: Vec<Result<Vec<u8>, String>> = entries.par_iter()
+        .map(|(_name, raw)| {
             if cancel.load(Ordering::Relaxed) {
                 return Err("Cancelled".to_string());
             }
-            let jpeg_data = process_image(raw, width, height, quality, contrast, grayscale, resize)?;
-            let out_name = Path::new(name)
-                .file_name()
-                .map(|n| Path::new(n).with_extension("jpg").to_string_lossy().into_owned())
-                .unwrap_or_else(|| format!("{:04}.jpg", i));
-            Ok((out_name, jpeg_data))
+            process_image(raw, width, height, quality, contrast, grayscale, resize)
         })
         .collect();
 
@@ -874,9 +883,10 @@ fn optimize_cbz(
         .compression_method(zip::CompressionMethod::Stored);
 
     for (i, result) in processed.into_iter().enumerate() {
-        let (out_name, jpeg_data) = result?;
+        let jpeg_data = result?;
         emit_progress(app, i + 1, total, &format!("Processing {}/{total}", i + 1));
 
+        let out_name = format!("{:04}.jpg", i);
         zip_writer.start_file(&out_name, zip_options)
             .map_err(|e| format!("ZIP write error: {e}"))?;
         zip_writer.write_all(&jpeg_data)
@@ -1108,14 +1118,19 @@ fn image_ext_from_bytes(data: &[u8]) -> &'static str {
 }
 
 #[cfg(unix)]
+static STDERR_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
+
+#[cfg(unix)]
 struct StderrGuard {
     old_fd: i32,
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(unix)]
 impl StderrGuard {
     fn new() -> Option<Self> {
         use std::os::unix::io::AsRawFd;
+        let lock = STDERR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let devnull = fs::File::open("/dev/null").ok()?;
         let old_fd = unsafe { libc::dup(2) };
         if old_fd < 0 { return None; }
@@ -1124,7 +1139,7 @@ impl StderrGuard {
             unsafe { libc::close(old_fd); }
             return None;
         }
-        Some(Self { old_fd })
+        Some(Self { old_fd, _lock: lock })
     }
 }
 

@@ -264,12 +264,12 @@ function App() {
         options: {
           input_path: comicPath,
           output_dir: dir,
-          quality,
+          quality: typeof quality === "number" && quality >= 1 ? quality : 20,
           contrast,
           no_split: noSplit,
           device,
           skip_existing: skipExisting,
-          preserve_color: preserveColor,
+          preserve_color: device === "optimize" ? preserveColor : false,
         },
       });
       setConvertResult(result);
@@ -325,12 +325,12 @@ function App() {
           options: {
             input_path: batchFiles[i],
             output_dir: dir,
-            quality,
+            quality: typeof quality === "number" && quality >= 1 ? quality : 20,
             contrast,
             no_split: noSplit,
             device,
             skip_existing: skipExisting,
-            preserve_color: preserveColor,
+            preserve_color: device === "optimize" ? preserveColor : false,
           },
         });
         results.push(result);
@@ -343,7 +343,7 @@ function App() {
       }
     }
     const secs = (Date.now() - start) / 1000;
-    const totalSecs = Math.floor(secs);
+    const totalSecs = Math.max(1, Math.floor(secs));
     const mm = Math.floor(totalSecs / 60);
     const ss = totalSecs % 60;
     setBatchElapsed(`${mm}:${String(ss).padStart(2, "0")}`);
