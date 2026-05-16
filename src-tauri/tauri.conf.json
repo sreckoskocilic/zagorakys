@@ -37,7 +37,7 @@
     "targets": ["nsis"],
     "windows": {
       "nsis": {
-        "installMode": "both"
+        "installMode": "currentUser"
       }
     },
     "icon": [
