@@ -19,6 +19,8 @@
   --green-bg: rgba(108, 248, 127, 0.08);
   --red: #E85D5D;
   --red-bg: rgba(232, 93, 93, 0.1);
+  --amber: #D4A017;
+  --amber-bg: rgba(212, 160, 23, 0.1);
   --r: 10px;
   --r-sm: 6px;
   --sidebar-w: 400px;
@@ -423,6 +425,18 @@ body {
 
 .batch-stat-skip .batch-stat-value {
   color: var(--text-dim);
+}
+
+.batch-file-lowres .batch-file-icon {
+  color: var(--amber);
+}
+
+.batch-file-lowres {
+  background: var(--amber-bg);
+}
+
+.batch-file-lowres .batch-file-size {
+  color: var(--amber);
 }
 
 .batch-file-name {
@@ -843,11 +857,40 @@ button:disabled {
 
 .zoom-label {
   font-family: var(--mono);
-  min-width: 48px;
-  text-align: center;
   font-size: 15px;
   color: var(--text);
   font-variant-numeric: tabular-nums;
+}
+
+.page-input,
+.zoom-input {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border-btn);
+  border-radius: 4px;
+  padding: 3px 4px;
+  -moz-appearance: textfield;
+}
+
+.page-input { width: 48px; }
+.zoom-input { width: 52px; }
+
+.page-input::-webkit-inner-spin-button,
+.page-input::-webkit-outer-spin-button,
+.zoom-input::-webkit-inner-spin-button,
+.zoom-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.page-input:focus,
+.zoom-input:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 
 .version-section {

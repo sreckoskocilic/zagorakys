@@ -15,6 +15,7 @@ interface ConvertResult {
   title: string;
   elapsed: string;
   skipped: boolean;
+  skip_reason: string;
 }
 
 interface ConvertProgress {
@@ -61,6 +62,10 @@ function App() {
   const [dragging, setDragging] = useState(false);
   const [skipExisting, setSkipExisting] = useState(() => localStorage.getItem("zagorakys-skip") === "true");
   const [preserveColor, setPreserveColor] = useState(() => localStorage.getItem("zagorakys-preserve-color") === "true");
+  const [minResolution, setMinResolution] = useState(() => {
+    const v = localStorage.getItem("zagorakys-min-resolution");
+    return v ? Number(v) : 0;
+  });
   const [hideCover, setHideCover] = useState(() => localStorage.getItem("zagorakys-hidecover") === "true");
   const cancelRef = useRef(false);
   const pageRequestId = useRef(0);
@@ -97,6 +102,7 @@ function App() {
   useEffect(() => { localStorage.setItem("zagorakys-nosplit", String(noSplit)); }, [noSplit]);
   useEffect(() => { localStorage.setItem("zagorakys-skip", String(skipExisting)); }, [skipExisting]);
   useEffect(() => { localStorage.setItem("zagorakys-preserve-color", String(preserveColor)); }, [preserveColor]);
+  useEffect(() => { localStorage.setItem("zagorakys-min-resolution", String(minResolution)); }, [minResolution]);
   useEffect(() => { localStorage.setItem("zagorakys-hidecover", String(hideCover)); }, [hideCover]);
   useEffect(() => { localStorage.setItem("zagorakys-outputdir", outputDir); }, [outputDir]);
 
@@ -271,6 +277,7 @@ function App() {
           device,
           skip_existing: skipExisting,
           preserve_color: device === "optimize" ? preserveColor : false,
+          min_resolution: minResolution,
         },
       });
       setConvertResult(result);
@@ -332,6 +339,7 @@ function App() {
             device,
             skip_existing: skipExisting,
             preserve_color: device === "optimize" ? preserveColor : false,
+            min_resolution: minResolution,
           },
         });
         results.push(result);
@@ -386,10 +394,27 @@ function App() {
       loadPage(mobiPath, currentPage + 1);
   };
 
+  const firstPage = () => {
+    if (currentPage !== 0) loadPage(mobiPath, 0);
+  };
+
+  const lastPage = () => {
+    if (mobiInfo && currentPage !== mobiInfo.page_count - 1)
+      loadPage(mobiPath, mobiInfo.page_count - 1);
+  };
+
+  const goToPage = (page: number) => {
+    if (!mobiInfo) return;
+    const clamped = Math.max(0, Math.min(page, mobiInfo.page_count - 1));
+    if (clamped !== currentPage) loadPage(mobiPath, clamped);
+  };
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "ArrowLeft") prevPage();
       if (e.key === "ArrowRight") nextPage();
+      if (e.key === "Home") { e.preventDefault(); firstPage(); }
+      if (e.key === "End") { e.preventDefault(); lastPage(); }
       if ((e.key === "=" || e.key === "+") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); zoomIn(); }
       if (e.key === "-" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); zoomOut(); }
       if (e.key === "0" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); setZoom(1); }
@@ -506,10 +531,10 @@ function App() {
               </div>
               <div className="batch-file-list">
                 {batchResults.map((r, i) => (
-                  <div key={i} className={`batch-file-item ${r.skipped ? "batch-file-skip" : "batch-file-ok"}`}>
+                  <div key={i} className={`batch-file-item ${r.skipped ? ((r.skip_reason.startsWith("low res") || r.skip_reason.startsWith("lossless")) ? "batch-file-lowres" : "batch-file-skip") : "batch-file-ok"}`}>
                     <span className="batch-file-icon">{r.skipped ? "–" : "✓"}</span>
                     <span className="batch-file-name" title={fileName(r.output_path)}>{r.title || fileName(r.output_path)}</span>
-                    <span className="batch-file-size">{r.skipped ? "exists" : r.output_size}</span>
+                    <span className="batch-file-size">{r.skipped ? r.skip_reason || "exists" : r.output_size}</span>
                   </div>
                 ))}
                 {batchErrors.map((name, i) => (
@@ -621,6 +646,20 @@ function App() {
                   Skip already converted
                 </label>
                 <label className="checkbox-label">
+                  Skip low-res:
+                  <select
+                    className="theme-select"
+                    value={minResolution}
+                    onChange={(e) => setMinResolution(Number(e.target.value))}
+                  >
+                    <option value={0}>Off</option>
+                    <option value={600}>600px (web scans)</option>
+                    <option value={800}>800px (low quality)</option>
+                    <option value={1000}>1000px (below HD)</option>
+                    <option value={1200}>1200px (below Kindle PW)</option>
+                  </select>
+                </label>
+                <label className="checkbox-label">
                   <input
                     type="checkbox"
                     checked={hideCover}
@@ -695,23 +734,37 @@ function App() {
         {pageImage ? (
           <>
             <div className="preview-nav">
-              <button onClick={prevPage} disabled={currentPage === 0}>
-                ◀
-              </button>
-              <span>
-                {currentPage + 1} / {mobiInfo?.page_count ?? "?"}
-              </span>
-              <button
-                onClick={nextPage}
-                disabled={
-                  !mobiInfo || currentPage >= mobiInfo.page_count - 1
-                }
-              >
-                ▶
-              </button>
+              <button onClick={firstPage} disabled={currentPage === 0} title="First page">⏮</button>
+              <button onClick={prevPage} disabled={currentPage === 0}>◀</button>
+              <input
+                type="number"
+                className="page-input"
+                min={1}
+                max={mobiInfo?.page_count ?? 1}
+                value={currentPage + 1}
+                onChange={e => {
+                  const val = parseInt(e.target.value, 10);
+                  if (!isNaN(val)) goToPage(val - 1);
+                }}
+              />
+              <span>/ {mobiInfo?.page_count ?? "?"}</span>
+              <button onClick={nextPage} disabled={!mobiInfo || currentPage >= mobiInfo.page_count - 1}>▶</button>
+              <button onClick={lastPage} disabled={!mobiInfo || currentPage >= mobiInfo.page_count - 1} title="Last page">⏭</button>
               <span className="nav-separator">|</span>
               <button onClick={zoomOut} disabled={zoom <= 0.25}>−</button>
-              <span className="zoom-label">{Math.round(zoom * 100)}%</span>
+              <input
+                type="number"
+                className="zoom-input"
+                min={25}
+                max={300}
+                step={25}
+                value={Math.round(zoom * 100)}
+                onChange={e => {
+                  const val = parseInt(e.target.value, 10);
+                  if (!isNaN(val)) setZoom(Math.max(0.25, Math.min(3, val / 100)));
+                }}
+              />
+              <span className="zoom-label">%</span>
               <button onClick={zoomIn} disabled={zoom >= 3}>+</button>
             </div>
             <div className={`preview-image-container${zoom > 1 ? " zoomed" : ""}`}>

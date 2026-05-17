@@ -38,6 +38,8 @@ pub struct ConvertOptions {
     pub skip_existing: bool,
     #[serde(default)]
     pub preserve_color: bool,
+    #[serde(default)]
+    pub min_resolution: u32,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -57,6 +59,7 @@ pub struct ConvertResult {
     pub title: String,
     pub elapsed: String,
     pub skipped: bool,
+    pub skip_reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -230,18 +233,19 @@ fn extract_images_from_cbz(path: &Path) -> Result<Vec<Vec<u8>>, String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&data))
         .map_err(|e| format!("Cannot open CBZ: {e}"))?;
 
-    let names: Vec<String> = (0..archive.len())
+    let mut names: Vec<String> = (0..archive.len())
         .filter_map(|i| {
             let file = archive.by_index(i).ok()?;
             let name = file.name().to_string();
             let lower = name.to_lowercase();
-            if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".webp") || lower.ends_with(".bmp") {
+            if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".webp") || lower.ends_with(".bmp") || lower.ends_with(".gif") || lower.ends_with(".tif") || lower.ends_with(".tiff") {
                 Some(name)
             } else {
                 None
             }
         })
         .collect();
+    names.sort();
 
     let mut images = Vec::new();
     for name in &names {
@@ -367,7 +371,13 @@ fn detect_archive_type(path: &Path) -> &'static str {
     }
 }
 
-fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, String> {
+fn is_zip_out_of_order(names: &[String]) -> bool {
+    let mut sorted = names.to_vec();
+    sorted.sort();
+    names != sorted
+}
+
+fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<(usize, bool), String> {
     use std::io::Read;
 
     let archive_type = detect_archive_type(input_path);
@@ -377,7 +387,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&data))
             .map_err(|e| format!("Cannot open CBZ: {e}"))?;
 
-        let names: Vec<String> = (0..archive.len())
+        let mut names: Vec<String> = (0..archive.len())
             .filter_map(|i| {
                 let file = archive.by_index(i).ok()?;
                 let name = file.name().to_string();
@@ -387,6 +397,9 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
                     || lower.ends_with(".png")
                     || lower.ends_with(".webp")
                     || lower.ends_with(".bmp")
+                    || lower.ends_with(".gif")
+                    || lower.ends_with(".tif")
+                    || lower.ends_with(".tiff")
                 {
                     Some(name)
                 } else {
@@ -394,6 +407,8 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
                 }
             })
             .collect();
+        let reordered = is_zip_out_of_order(&names);
+        names.sort();
 
         let mut count = 0;
         for name in &names {
@@ -408,7 +423,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
                 }
             }
         }
-        Ok(count)
+        Ok((count, reordered))
     } else if archive_type == "rar" {
         #[cfg(windows)]
         hide_console_window();
@@ -442,7 +457,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
             .filter_map(|e| {
                 let path = e.ok()?.path();
                 let ext = path.extension()?.to_str()?.to_lowercase();
-                if ["jpg", "jpeg", "png", "webp", "bmp"].contains(&ext.as_str()) {
+                if ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"].contains(&ext.as_str()) {
                     Some(path)
                 } else {
                     None
@@ -463,7 +478,8 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
                         let lower = line.to_lowercase();
                         if lower.ends_with(".jpg") || lower.ends_with(".jpeg")
                             || lower.ends_with(".png") || lower.ends_with(".webp")
-                            || lower.ends_with(".bmp")
+                            || lower.ends_with(".bmp") || lower.ends_with(".gif")
+                            || lower.ends_with(".tif") || lower.ends_with(".tiff")
                         {
                             Path::new(line).file_name()
                                 .map(|n| n.to_string_lossy().to_string())
@@ -501,7 +517,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, S
                 }
             }
         }
-        Ok(count)
+        Ok((count, false))
     } else {
         Err(format!("Unsupported archive format: {archive_type}"))
     }
@@ -680,6 +696,101 @@ fn collect_rendered_images(dir: &Path) -> Result<usize, String> {
     Ok(count)
 }
 
+fn peek_image_dimensions(raw: &[u8]) -> Option<(u32, u32)> {
+    use image::ImageReader;
+    use std::io::Cursor;
+    ImageReader::new(Cursor::new(raw))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+fn is_lossless_format(raw: &[u8]) -> bool {
+    if raw.len() < 6 { return false; }
+    // BMP
+    if raw[0] == 0x42 && raw[1] == 0x4D { return true; }
+    // GIF
+    if &raw[0..3] == b"GIF" { return true; }
+    // TIFF (little-endian or big-endian)
+    if (raw[0] == 0x49 && raw[1] == 0x49 && raw[2] == 0x2A && raw[3] == 0x00)
+        || (raw[0] == 0x4D && raw[1] == 0x4D && raw[2] == 0x00 && raw[3] == 0x2A) { return true; }
+    // PNG
+    if raw.len() >= 8 && raw[0] == 0x89 && &raw[1..4] == b"PNG" { return true; }
+    false
+}
+
+fn check_source_quality(input_path: &Path, target: u32, split: bool) -> Option<(u32, u32, bool, bool)> {
+    use std::io::Read;
+
+    let peek_mid = |buf: &[u8]| -> Option<(u32, u32, bool, bool)> {
+        let (w, h) = peek_image_dimensions(buf)?;
+        let landscape = w > h;
+        let lossless = is_lossless_format(buf);
+        let effective_w = if landscape && split { w / 2 } else { w };
+        let too_small = target > 0 && effective_w < target && h < target;
+        if !too_small && !lossless {
+            None
+        } else {
+            Some((w, h, landscape, lossless))
+        }
+    };
+
+    let archive_type = detect_archive_type(input_path);
+    if archive_type == "zip" {
+        let data = fs::read(input_path).ok()?;
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&data)).ok()?;
+        let mut names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let file = archive.by_index(i).ok()?;
+                let name = file.name().to_string();
+                let lower = name.to_lowercase();
+                if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".webp") || lower.ends_with(".bmp") || lower.ends_with(".gif") || lower.ends_with(".tif") || lower.ends_with(".tiff") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        names.sort();
+        if names.is_empty() { return None; }
+        let mid = names.len() / 2;
+        let mut file = archive.by_name(&names[mid]).ok()?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).ok()?;
+        peek_mid(&buf)
+    } else if archive_type == "rar" {
+        let tmp_dir = tempfile::TempDir::new().ok()?;
+        let unrar = find_unrar()?;
+        let status = std::process::Command::new(&unrar)
+            .args(["e", "-o+", "-inul", "--"])
+            .arg(input_path)
+            .arg(tmp_dir.path())
+            .status()
+            .ok()?;
+        if !status.success() { return None; }
+        let mut imgs: Vec<PathBuf> = fs::read_dir(tmp_dir.path())
+            .ok()?
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                let ext = path.extension()?.to_str()?.to_lowercase();
+                if ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"].contains(&ext.as_str()) {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        imgs.sort();
+        if imgs.is_empty() { return None; }
+        let mid = imgs.len() / 2;
+        let data = fs::read(&imgs[mid]).ok()?;
+        peek_mid(&data)
+    } else {
+        None
+    }
+}
+
 fn decode_image(raw: &[u8]) -> Result<image::DynamicImage, String> {
     use image::ImageReader;
     use std::io::Cursor;
@@ -774,7 +885,7 @@ fn optimize_dir_to_cbz(
         .filter_map(|e| {
             let path = e.ok()?.path();
             let ext = path.extension()?.to_str()?.to_lowercase();
-            if ["jpg", "jpeg", "png", "webp", "ppm", "bmp"].contains(&ext.as_str()) {
+            if ["jpg", "jpeg", "png", "webp", "ppm", "bmp", "gif", "tif", "tiff"].contains(&ext.as_str()) {
                 Some(path)
             } else {
                 None
@@ -862,18 +973,22 @@ fn optimize_cbz(
         let reader = zip::ZipArchive::new(Cursor::new(&data))
             .map_err(|e| format!("Cannot open archive: {e}"))?;
         let mut archive = reader;
-        let names: Vec<String> = (0..archive.len())
+        let mut names: Vec<String> = (0..archive.len())
             .filter_map(|i| {
                 let file = archive.by_index(i).ok()?;
                 let name = file.name().to_string();
                 let lower = name.to_lowercase();
-                if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".webp") || lower.ends_with(".bmp") {
+                if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".webp") || lower.ends_with(".bmp") || lower.ends_with(".gif") || lower.ends_with(".tif") || lower.ends_with(".tiff") {
                     Some(name)
                 } else {
                     None
                 }
             })
             .collect();
+        if is_zip_out_of_order(&names) {
+            emit_progress(app, 0, 1, "Source archive had out-of-order pages, reordering...");
+        }
+        names.sort();
 
         for name in &names {
             let mut file = archive.by_name(name).map_err(|e| format!("Cannot read {name}: {e}"))?;
@@ -884,7 +999,7 @@ fn optimize_cbz(
     } else if archive_type == "rar" {
         let tmp_dir = tempfile::TempDir::new()
             .map_err(|e| format!("Cannot create temp dir: {e}"))?;
-        let count = extract_archive_to_dir(input_path, tmp_dir.path())?;
+        let (count, _) = extract_archive_to_dir(input_path, tmp_dir.path())?;
         if count == 0 {
             return Err("No images found in archive".to_string());
         }
@@ -893,7 +1008,7 @@ fn optimize_cbz(
             .filter_map(|e| {
                 let path = e.ok()?.path();
                 let ext = path.extension()?.to_str()?.to_lowercase();
-                if ["jpg", "jpeg", "png", "webp", "bmp"].contains(&ext.as_str()) {
+                if ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"].contains(&ext.as_str()) {
                     Some(path)
                 } else {
                     None
@@ -992,6 +1107,7 @@ pub async fn convert_comic(
             title,
             elapsed: "0.0s".to_string(),
             skipped: true,
+            skip_reason: "exists".to_string(),
         });
     }
 
@@ -1028,6 +1144,32 @@ pub async fn convert_comic(
         .unwrap_or("")
         .to_lowercase();
     let is_pdf = ext == "pdf";
+
+    let min_res = options.min_resolution;
+    let split = !options.no_split;
+    if !is_pdf {
+        if let Some((src_w, src_h, landscape, lossless)) = check_source_quality(&input_path, min_res, split) {
+            let reason = if lossless {
+                format!("lossless source ({src_w}x{src_h})")
+            } else if landscape && split {
+                format!("low res after split ({}/2 x {src_h})", src_w)
+            } else {
+                format!("low res ({src_w}x{src_h})")
+            };
+            emit_progress(&app, 0, 1, &format!("Skipped: {reason}"));
+            return Ok(ConvertResult {
+                output_path: expected_output.to_string_lossy().to_string(),
+                output_size: String::new(),
+                input_size,
+                input_bytes,
+                output_bytes: 0,
+                title,
+                elapsed: "0.0s".to_string(),
+                skipped: true,
+                skip_reason: reason,
+            });
+        }
+    }
 
     let grayscale = if is_optimize { !options.preserve_color } else { true };
     let resize = true;
@@ -1075,13 +1217,16 @@ pub async fn convert_comic(
             render_pdf_to_dir(&input_path, tmp_dir.path())?;
         } else {
             emit_progress(&app, 0, 1, "Extracting archive...");
-            extract_archive_to_dir(&input_path, tmp_dir.path())?;
+            let (_, reordered) = extract_archive_to_dir(&input_path, tmp_dir.path())?;
+            if reordered {
+                emit_progress(&app, 0, 1, "Source archive had out-of-order pages, reordered");
+            }
         }
 
         let img_count = fs::read_dir(tmp_dir.path())
             .map(|rd| rd.filter_map(|e| {
                 let ext = e.ok()?.path().extension()?.to_str()?.to_lowercase();
-                ["jpg", "jpeg", "png", "webp", "ppm", "bmp"].contains(&ext.as_str()).then_some(())
+                ["jpg", "jpeg", "png", "webp", "ppm", "bmp", "gif", "tif", "tiff"].contains(&ext.as_str()).then_some(())
             }).count())
             .unwrap_or(0);
         if img_count == 0 {
@@ -1128,6 +1273,7 @@ pub async fn convert_comic(
         title,
         elapsed,
         skipped: false,
+        skip_reason: String::new(),
     })
 }
 
