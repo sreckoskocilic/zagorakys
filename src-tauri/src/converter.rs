@@ -429,7 +429,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<(usize, 
         hide_console_window();
 
         let unrar = find_unrar().ok_or_else(|| {
-            "unrar not found. Install unrar (brew install unrar / apt install unrar)".to_string()
+            "unrar not found — install it with: brew install unrar (macOS) or apt install unrar (Linux)".to_string()
         })?;
 
         let status = std::process::Command::new(&unrar)
@@ -615,7 +615,7 @@ fn render_pdf_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, String
         }
     }
 
-    Err("PDF renderer not found. Install mupdf-tools (brew install mupdf-tools) or poppler (brew install poppler)".to_string())
+    Err("No PDF renderer found — install mupdf-tools or poppler".to_string())
 }
 
 fn find_tool(candidates: &[&str]) -> Option<PathBuf> {
@@ -1120,7 +1120,7 @@ pub async fn convert_comic(
             }
             counter += 1;
             if counter > 9999 {
-                return Err("Too many output files with the same name".to_string());
+                return Err("Too many files with the same name in output folder".to_string());
             }
         }
     } else {
@@ -1219,7 +1219,7 @@ pub async fn convert_comic(
             emit_progress(&app, 0, 1, "Extracting archive...");
             let (_, reordered) = extract_archive_to_dir(&input_path, tmp_dir.path())?;
             if reordered {
-                emit_progress(&app, 0, 1, "Source archive had out-of-order pages, reordered");
+                emit_progress(&app, 0, 1, "Pages were out of order, reordered");
             }
         }
 
