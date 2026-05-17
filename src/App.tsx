@@ -273,7 +273,7 @@ function App() {
           output_dir: dir,
           quality: typeof quality === "number" && quality >= 1 ? quality : 20,
           contrast,
-          no_split: noSplit,
+          no_split: device === "optimize" ? true : noSplit,
           device,
           skip_existing: skipExisting,
           preserve_color: device === "optimize" ? preserveColor : false,
@@ -335,7 +335,7 @@ function App() {
             output_dir: dir,
             quality: typeof quality === "number" && quality >= 1 ? quality : 20,
             contrast,
-            no_split: noSplit,
+            no_split: device === "optimize" ? true : noSplit,
             device,
             skip_existing: skipExisting,
             preserve_color: device === "optimize" ? preserveColor : false,
@@ -531,7 +531,7 @@ function App() {
               </div>
               <div className="batch-file-list">
                 {batchResults.map((r, i) => (
-                  <div key={i} className={`batch-file-item ${r.skipped ? ((r.skip_reason.startsWith("low res") || r.skip_reason.startsWith("lossless")) ? "batch-file-lowres" : "batch-file-skip") : "batch-file-ok"}`}>
+                  <div key={i} className={`batch-file-item ${r.skipped ? (r.skip_reason.startsWith("low res") ? "batch-file-lowres" : "batch-file-skip") : "batch-file-ok"}`}>
                     <span className="batch-file-icon">{r.skipped ? "–" : "✓"}</span>
                     <span className="batch-file-name" title={fileName(r.output_path)}>{r.title || fileName(r.output_path)}</span>
                     <span className="batch-file-size">{r.skipped ? r.skip_reason || "exists" : r.output_size}</span>

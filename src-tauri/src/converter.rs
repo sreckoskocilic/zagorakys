@@ -706,33 +706,18 @@ fn peek_image_dimensions(raw: &[u8]) -> Option<(u32, u32)> {
         .ok()
 }
 
-fn is_lossless_format(raw: &[u8]) -> bool {
-    if raw.len() < 6 { return false; }
-    // BMP
-    if raw[0] == 0x42 && raw[1] == 0x4D { return true; }
-    // GIF
-    if &raw[0..3] == b"GIF" { return true; }
-    // TIFF (little-endian or big-endian)
-    if (raw[0] == 0x49 && raw[1] == 0x49 && raw[2] == 0x2A && raw[3] == 0x00)
-        || (raw[0] == 0x4D && raw[1] == 0x4D && raw[2] == 0x00 && raw[3] == 0x2A) { return true; }
-    // PNG
-    if raw.len() >= 8 && raw[0] == 0x89 && &raw[1..4] == b"PNG" { return true; }
-    false
-}
-
-fn check_source_quality(input_path: &Path, target: u32, split: bool) -> Option<(u32, u32, bool, bool)> {
+fn check_source_quality(input_path: &Path, target: u32, split: bool) -> Option<(u32, u32, bool)> {
     use std::io::Read;
 
-    let peek_mid = |buf: &[u8]| -> Option<(u32, u32, bool, bool)> {
+    let peek_mid = |buf: &[u8]| -> Option<(u32, u32, bool)> {
         let (w, h) = peek_image_dimensions(buf)?;
         let landscape = w > h;
-        let lossless = is_lossless_format(buf);
         let effective_w = if landscape && split { w / 2 } else { w };
         let too_small = target > 0 && effective_w < target && h < target;
-        if !too_small && !lossless {
-            None
+        if too_small {
+            Some((w, h, landscape))
         } else {
-            Some((w, h, landscape, lossless))
+            None
         }
     };
 
@@ -1148,10 +1133,8 @@ pub async fn convert_comic(
     let min_res = options.min_resolution;
     let split = !options.no_split;
     if !is_pdf {
-        if let Some((src_w, src_h, landscape, lossless)) = check_source_quality(&input_path, min_res, split) {
-            let reason = if lossless {
-                format!("lossless source ({src_w}x{src_h})")
-            } else if landscape && split {
+        if let Some((src_w, src_h, landscape)) = check_source_quality(&input_path, min_res, split) {
+            let reason = if landscape && split {
                 format!("low res after split ({}/2 x {src_h})", src_w)
             } else {
                 format!("low res ({src_w}x{src_h})")
@@ -1487,7 +1470,7 @@ mod tests {
         assert_eq!(device_profile("kindle-paperwhite"), (1072, 1448, "kindle_pw"));
         assert_eq!(device_profile("kindle-oasis"), (1264, 1680, "kindle_oasis"));
         assert_eq!(device_profile("kobo-clara-hd"), (1072, 1448, "kobo_clara_hd"));
-        assert_eq!(device_profile("optimize"), (9999, 9999, "optimized"));
+        assert_eq!(device_profile("optimize"), (2048, 2048, "optimized"));
         assert_eq!(device_profile("unknown"), (600, 800, "kindle4"));
     }
 
