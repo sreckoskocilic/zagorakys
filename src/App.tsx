@@ -37,13 +37,26 @@ interface MobiPage {
   page_count: number;
 }
 
+const QUALITY_PRESETS = [
+  { value: 10, label: "Low (10)" },
+  { value: 20, label: "Standard (20)" },
+  { value: 40, label: "High (40)" },
+  { value: 80, label: "Maximum (80)" },
+];
+
+function snapToPreset(n: number): number {
+  return QUALITY_PRESETS.reduce((prev, curr) =>
+    Math.abs(curr.value - n) < Math.abs(prev.value - n) ? curr : prev
+  ).value;
+}
+
 function App() {
   const [comicPath, setComicPath] = useState("");
   const [outputDir, setOutputDir] = useState(() => localStorage.getItem("zagorakys-outputdir") || "");
   const [quality, setQuality] = useState(() => {
     const v = localStorage.getItem("zagorakys-quality");
     const n = v ? Number(v) : 20;
-    return (!n || n < 1) ? 20 : Math.min(100, n);
+    return snapToPreset((!n || n < 1) ? 20 : n);
   });
   const [contrast, setContrast] = useState(() => localStorage.getItem("zagorakys-contrast") === "true");
   const [converting, setConverting] = useState(false);
@@ -93,10 +106,7 @@ function App() {
     localStorage.setItem("zagorakys-theme", theme);
   }, [theme]);
 
-  useEffect(() => {
-    localStorage.setItem("zagorakys-device", device);
-  }, [device]);
-
+  useEffect(() => { localStorage.setItem("zagorakys-device", device); }, [device]);
   useEffect(() => { localStorage.setItem("zagorakys-quality", String(quality)); }, [quality]);
   useEffect(() => { localStorage.setItem("zagorakys-contrast", String(contrast)); }, [contrast]);
   useEffect(() => { localStorage.setItem("zagorakys-nosplit", String(noSplit)); }, [noSplit]);
@@ -119,9 +129,7 @@ function App() {
     const unlisten = listen<ConvertProgress>("convert-progress", (event) => {
       setProgress(event.payload);
     });
-    return () => {
-      unlisten.then((f) => f());
-    };
+    return () => { unlisten.then((f) => f()); };
   }, []);
 
   const loadPage = useCallback(
@@ -382,6 +390,15 @@ function App() {
     if (selected) loadMobi(selected as string);
   };
 
+  const removeBatchFile = (index: number) => {
+    const newFiles = batchFiles.filter((_, i) => i !== index);
+    setBatchFiles(newFiles);
+    if (newFiles.length === 0) {
+      setBatchResults([]);
+      setBatchErrors([]);
+    }
+  };
+
   const zoomIn = () => setZoom(z => Math.min(3, +(z + 0.25).toFixed(2)));
   const zoomOut = () => setZoom(z => Math.max(0.25, +(z - 0.25).toFixed(2)));
 
@@ -432,13 +449,9 @@ function App() {
   };
 
   const convertLabel = () => {
-    if (!converting) {
-      if (isBatch) return `${device === "optimize" ? "Optimize" : "Convert"} ${batchFiles.length} Files`;
-      if (device === "optimize") return "Optimize CBZ";
-      return device.startsWith("kobo") ? "Convert to CBZ" : "Convert to MOBI";
-    }
-    if (isBatch) return `Converting ${batchIndex + 1}/${batchFiles.length}...`;
-    return "Converting...";
+    if (isBatch) return `${device === "optimize" ? "Optimize" : "Convert"} ${batchFiles.length} Files`;
+    if (device === "optimize") return "Optimize";
+    return device.startsWith("kobo") ? "Convert to CBZ" : "Convert to MOBI";
   };
 
   const progressPercent =
@@ -448,93 +461,164 @@ function App() {
 
   return (
     <div className="app">
-      <div className="sidebar">
-        <div className="sidebar-actions">
-          <button className="sidebar-btn" onClick={selectComic} disabled={converting}>
-            Select File
-          </button>
+      {error && (
+        <div className="error-banner">
+          <span>{error}</span>
+          <button className="error-close" onClick={() => setError("")}>&times;</button>
+        </div>
+      )}
 
-          <button className="sidebar-btn" onClick={selectFolder} disabled={converting}>
-            Select Folder
-          </button>
+      <div className="toolbar">
+        <span className="toolbar-label">Device</span>
+        <select
+          className="toolbar-select"
+          value={device}
+          onChange={(e) => setDevice(e.target.value)}
+          disabled={converting}
+        >
+          <option value="kindle4">Kindle 4 (600×800)</option>
+          <option value="kindle-paperwhite">Kindle Paperwhite (1072×1448)</option>
+          <option value="kindle-oasis">Kindle Oasis (1264×1680)</option>
+          <option value="kobo-clara-hd">Kobo Clara HD (1072×1448)</option>
+          <option value="optimize">Optimize (reduce size)</option>
+        </select>
 
-          <button
-            className="sidebar-btn primary"
-            onClick={handleConvert}
-            disabled={!hasInput || converting}
-          >
+        <div className="toolbar-div" />
+
+        <span className="toolbar-label">Quality</span>
+        <select
+          className="toolbar-select"
+          value={quality}
+          onChange={(e) => setQuality(Number(e.target.value))}
+          disabled={converting}
+        >
+          {QUALITY_PRESETS.map((p) => (
+            <option key={p.value} value={p.value}>{p.label}</option>
+          ))}
+        </select>
+
+        <div className="toolbar-spacer" />
+
+        {converting ? (
+          <button className="btn-cancel" onClick={cancelConvert}>Cancel</button>
+        ) : (
+          <button className="btn-convert" onClick={handleConvert} disabled={!hasInput}>
             {convertLabel()}
           </button>
+        )}
 
-          {converting && (
-            <button className="sidebar-btn cancel-btn" onClick={cancelConvert}>
-              Cancel
+        <div className="toolbar-div" />
+
+        <button className="toolbar-btn" onClick={openMobi} disabled={converting}>
+          Open Book
+        </button>
+        <button
+          className={`toolbar-btn gear${showSettings ? " active" : ""}`}
+          onClick={() => setShowSettings(!showSettings)}
+        >
+          &#9881;
+        </button>
+      </div>
+
+      {converting && progress && !isBatch && (
+        <div className="progress-strip">
+          <div className="progress-bar">
+            <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
+          </div>
+          <span className="progress-text">{progress.message}</span>
+        </div>
+      )}
+
+      {converting && isBatch && (
+        <div className="progress-strip">
+          <div className="progress-bar">
+            <div
+              className="progress-fill"
+              style={{ width: `${Math.round(((batchIndex + (batchResults.length > batchIndex ? 1 : 0)) / batchFiles.length) * 100)}%` }}
+            />
+          </div>
+          <span className="progress-text">
+            {fileName(batchFiles[batchIndex])} ({batchIndex + 1}/{batchFiles.length})
+          </span>
+        </div>
+      )}
+
+      <div className="main">
+        <div className="file-panel">
+          <div className="fpanel-head">
+            <span className="fpanel-title">Queue</span>
+            {(isBatch || comicPath) && (
+              <span className="fpanel-count">
+                {isBatch ? `${batchFiles.length} files` : "1 file"}
+              </span>
+            )}
+          </div>
+
+          <div className="fpanel-actions">
+            <button className="fpanel-btn" onClick={selectComic} disabled={converting}>
+              + File
             </button>
-          )}
+            <button className="fpanel-btn" onClick={selectFolder} disabled={converting}>
+              + Folder
+            </button>
+          </div>
 
-          {converting && isBatch && (
-            <div className="progress-section">
-              <div className="progress-bar">
-                <div
-                  className="progress-fill"
-                  style={{ width: `${Math.round(((batchIndex + (batchResults.length > batchIndex ? 1 : 0)) / batchFiles.length) * 100)}%` }}
-                />
-              </div>
-              <p className="progress-text">{fileName(batchFiles[batchIndex])} ({batchIndex + 1}/{batchFiles.length})</p>
-            </div>
-          )}
-
-          {converting && !isBatch && progress && (
-            <div className="progress-section">
-              <div className="progress-bar">
-                <div
-                  className="progress-fill"
-                  style={{ width: `${progressPercent}%` }}
-                />
-              </div>
-              <p className="progress-text">{progress.message}</p>
-            </div>
-          )}
-
-          {showBatchSummary && !converting && (() => {
-            const converted = batchResults.filter(r => !r.skipped);
-            const skipped = batchResults.filter(r => r.skipped);
-            return (
+          {showBatchSummary && !converting ? (
             <div className="batch-summary">
               <div className="batch-summary-header">
-                <span className="batch-summary-title">Batch Complete in {batchElapsed}</span>
-                <button className="batch-summary-close" onClick={() => setShowBatchSummary(false)}>&times;</button>
+                <span className="batch-summary-title">Done in {batchElapsed}</span>
+                <button className="batch-summary-close" onClick={() => setShowBatchSummary(false)}>
+                  &times;
+                </button>
               </div>
               <div className="batch-summary-stats">
-                <div className="batch-stat">
-                  <span className="batch-stat-value">{converted.length}</span>
-                  <span className="batch-stat-label">converted</span>
-                </div>
-                {skipped.length > 0 && (
-                  <div className="batch-stat batch-stat-skip">
-                    <span className="batch-stat-value">{skipped.length}</span>
-                    <span className="batch-stat-label">skipped</span>
-                  </div>
-                )}
-                {batchErrors.length > 0 && (
-                  <div className="batch-stat batch-stat-error">
-                    <span className="batch-stat-value">{batchErrors.length}</span>
-                    <span className="batch-stat-label">failed</span>
-                  </div>
-                )}
-                {converted.length > 0 && (
-                <div className="batch-stat">
-                  <span className="batch-stat-value">{formatBytes(converted.reduce((s, r) => s + r.input_bytes, 0))} → {formatBytes(converted.reduce((s, r) => s + r.output_bytes, 0))}</span>
-                  <span className="batch-stat-label">compression</span>
-                </div>
-                )}
+                {(() => {
+                  const converted = batchResults.filter((r) => !r.skipped);
+                  const skipped = batchResults.filter((r) => r.skipped);
+                  return (
+                    <>
+                      <div className="batch-stat">
+                        <span className="batch-stat-value">{converted.length}</span>
+                        <span className="batch-stat-label">converted</span>
+                      </div>
+                      {skipped.length > 0 && (
+                        <div className="batch-stat batch-stat-skip">
+                          <span className="batch-stat-value">{skipped.length}</span>
+                          <span className="batch-stat-label">skipped</span>
+                        </div>
+                      )}
+                      {batchErrors.length > 0 && (
+                        <div className="batch-stat batch-stat-error">
+                          <span className="batch-stat-value">{batchErrors.length}</span>
+                          <span className="batch-stat-label">failed</span>
+                        </div>
+                      )}
+                      {converted.length > 0 && (
+                        <div className="batch-stat">
+                          <span className="batch-stat-value">
+                            {formatBytes(converted.reduce((s, r) => s + r.input_bytes, 0))} →{" "}
+                            {formatBytes(converted.reduce((s, r) => s + r.output_bytes, 0))}
+                          </span>
+                          <span className="batch-stat-label">compression</span>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
               <div className="batch-file-list">
                 {batchResults.map((r, i) => (
-                  <div key={i} className={`batch-file-item ${r.skipped ? (r.skip_reason.startsWith("low res") ? "batch-file-lowres" : "batch-file-skip") : "batch-file-ok"}`}>
+                  <div
+                    key={i}
+                    className={`batch-file-item ${r.skipped ? (r.skip_reason.startsWith("low res") ? "batch-file-lowres" : "batch-file-skip") : "batch-file-ok"}`}
+                  >
                     <span className="batch-file-icon">{r.skipped ? "–" : "✓"}</span>
-                    <span className="batch-file-name" title={fileName(r.output_path)}>{r.title || fileName(r.output_path)}</span>
-                    <span className="batch-file-size">{r.skipped ? r.skip_reason || "exists" : r.output_size}</span>
+                    <span className="batch-file-name" title={fileName(r.output_path)}>
+                      {r.title || fileName(r.output_path)}
+                    </span>
+                    <span className="batch-file-size">
+                      {r.skipped ? r.skip_reason || "exists" : r.output_size}
+                    </span>
                   </div>
                 ))}
                 {batchErrors.map((name, i) => (
@@ -545,110 +629,196 @@ function App() {
                 ))}
               </div>
             </div>
-            );
-          })()}
-
-          <div className="divider" />
-
-          <button className="sidebar-btn" onClick={openMobi}>
-            Open Book
-          </button>
-
-          {isBatch && !converting && !showBatchSummary && (
-            <div className="batch-file-preview">
-              <span className="batch-preview-label">{batchFiles.length} files</span>
-              <div className="batch-file-list">
-                {batchFiles.map((f, i) => (
-                  <div key={i} className="batch-file-item">
-                    <span className="batch-file-name" title={f}>{fileName(f)}</span>
+          ) : (
+            <div className="file-list">
+              {comicPath && !isBatch && (
+                <div className="file-item active">
+                  <span className="file-item-pre cur">&#9654;</span>
+                  <span className="file-item-name" title={comicPath}>
+                    {fileName(comicPath)}
+                  </span>
+                </div>
+              )}
+              {isBatch &&
+                batchFiles.map((f, i) => (
+                  <div
+                    key={i}
+                    className={`file-item${converting && i === batchIndex ? " active" : ""}`}
+                  >
+                    <span className={`file-item-pre${converting && i === batchIndex ? " cur" : ""}`}>
+                      {converting && i === batchIndex ? "▶" : "  "}
+                    </span>
+                    <span className="file-item-name" title={f}>
+                      {fileName(f)}
+                    </span>
+                    {!converting && (
+                      <button className="file-item-x" onClick={() => removeBatchFile(i)}>
+                        &#10005;
+                      </button>
+                    )}
                   </div>
                 ))}
-              </div>
             </div>
           )}
+
+          <div className="drop-zone">
+            <div className="dz-icon">&#8681;</div>
+            <div className="dz-text">Drop files or folders</div>
+            <div className="dz-hint">CBR CBZ RAR ZIP PDF</div>
+          </div>
         </div>
 
-        {error && <div className="msg error">{error}</div>}
-
-        <div className="sidebar-bottom">
-          {showSettings && (
-            <div className="settings-panel">
-              <div className="setting-group">
-                <span className="setting-group-label">Device</span>
-                <select
-                  className="theme-select"
-                  value={device}
-                  onChange={(e) => setDevice(e.target.value)}
+        <div className="preview-pane">
+          {pageImage ? (
+            <>
+              <div className="preview-nav">
+                <button onClick={firstPage} disabled={currentPage === 0} title="First page">
+                  &#9198;
+                </button>
+                <button onClick={prevPage} disabled={currentPage === 0}>&#9664;</button>
+                <input
+                  type="number"
+                  className="page-input"
+                  min={1}
+                  max={mobiInfo?.page_count ?? 1}
+                  value={currentPage + 1}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    if (!isNaN(val)) goToPage(val - 1);
+                  }}
+                />
+                <span>/ {mobiInfo?.page_count ?? "?"}</span>
+                <button
+                  onClick={nextPage}
+                  disabled={!mobiInfo || currentPage >= mobiInfo.page_count - 1}
                 >
-                  <option value="kindle4">Kindle 4 (600×800)</option>
-                  <option value="kindle-paperwhite">Kindle Paperwhite (1072×1448)</option>
-                  <option value="kindle-oasis">Kindle Oasis (1264×1680)</option>
-                  <option value="kobo-clara-hd">Kobo Clara HD (1072×1448)</option>
-                  <option value="optimize">Optimize (reduce size)</option>
-                </select>
+                  &#9654;
+                </button>
+                <button
+                  onClick={lastPage}
+                  disabled={!mobiInfo || currentPage >= mobiInfo.page_count - 1}
+                  title="Last page"
+                >
+                  &#9197;
+                </button>
+                <span className="nav-separator">|</span>
+                <button onClick={zoomOut} disabled={zoom <= 0.25}>&minus;</button>
+                <input
+                  type="number"
+                  className="zoom-input"
+                  min={25}
+                  max={300}
+                  step={25}
+                  value={Math.round(zoom * 100)}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    if (!isNaN(val)) setZoom(Math.max(0.25, Math.min(3, val / 100)));
+                  }}
+                />
+                <span className="zoom-pct">%</span>
+                <button onClick={zoomIn} disabled={zoom >= 3}>+</button>
               </div>
+              <div className={`preview-image-container${zoom > 1 ? " zoomed" : ""}`}>
+                <div
+                  className="kindle-frame"
+                  style={
+                    zoom !== 1
+                      ? {
+                          transform: `scale(${zoom})`,
+                          transformOrigin: zoom > 1 ? "0 0" : "center center",
+                        }
+                      : undefined
+                  }
+                >
+                  {hideCover ? (
+                    <img
+                      src={pageImage}
+                      alt={`Page ${currentPage + 1}`}
+                      className={`preview-bare${loadingPage ? " loading" : ""}`}
+                    />
+                  ) : (
+                    <div className="kindle-bezel">
+                      <span className="kindle-label">Kindle</span>
+                      <div className="kindle-screen">
+                        <img
+                          src={pageImage}
+                          alt={`Page ${currentPage + 1}`}
+                          className={loadingPage ? "loading" : ""}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="preview-empty">
+              <p>Drop files here or select from sidebar</p>
+              <span className="preview-empty-hint">CBR, CBZ, RAR, ZIP, PDF</span>
+            </div>
+          )}
 
-              <div className="setting-group">
-                <span className="setting-group-label">Conversion</span>
-                <label className="checkbox-label">
-                  Quality:
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    className="quality-input"
-                    value={quality}
-                    onChange={(e) => {
-                      const raw = e.target.value.replace(/\D/g, "");
-                      if (raw === "") { setQuality("" as any); return; }
-                      const n = Math.min(100, Number(raw));
-                      setQuality(n);
-                    }}
-                    onBlur={() => {
-                      const n = Number(quality);
-                      setQuality((!n || n < 1) ? 1 : Math.min(100, n));
-                    }}
-                  />
-                </label>
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={contrast}
-                    onChange={(e) => setContrast(e.target.checked)}
-                  />
-                  Enhance contrast
-                </label>
-                {!device.startsWith("kobo") && device !== "optimize" && (
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={noSplit}
-                    onChange={(e) => setNoSplit(e.target.checked)}
-                  />
-                  Don't split double pages
-                </label>
-                )}
-                {device === "optimize" && (
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={preserveColor}
-                    onChange={(e) => setPreserveColor(e.target.checked)}
-                  />
-                  Preserve color
-                </label>
-                )}
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={skipExisting}
-                    onChange={(e) => setSkipExisting(e.target.checked)}
-                  />
-                  Skip already converted
-                </label>
-                <label className="checkbox-label">
-                  Skip low-res:
+          {showSettings && (
+            <div className="settings-slide">
+              <div className="settings-header">
+                <span className="settings-title">Settings</span>
+                <button className="settings-close" onClick={() => setShowSettings(false)}>
+                  &times;
+                </button>
+              </div>
+              <div className="settings-body">
+                <div className="setting-group">
+                  <span className="setting-group-label">Conversion</span>
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={contrast}
+                      onChange={(e) => setContrast(e.target.checked)}
+                    />
+                    Enhance contrast
+                  </label>
+                  {!device.startsWith("kobo") && device !== "optimize" && (
+                    <label className="checkbox-label">
+                      <input
+                        type="checkbox"
+                        checked={noSplit}
+                        onChange={(e) => setNoSplit(e.target.checked)}
+                      />
+                      Don't split double pages
+                    </label>
+                  )}
+                  {device === "optimize" && (
+                    <label className="checkbox-label">
+                      <input
+                        type="checkbox"
+                        checked={preserveColor}
+                        onChange={(e) => setPreserveColor(e.target.checked)}
+                      />
+                      Preserve color
+                    </label>
+                  )}
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={skipExisting}
+                      onChange={(e) => setSkipExisting(e.target.checked)}
+                    />
+                    Skip already converted
+                  </label>
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={hideCover}
+                      onChange={(e) => setHideCover(e.target.checked)}
+                    />
+                    Hide Kindle frame
+                  </label>
+                </div>
+
+                <div className="setting-group">
+                  <span className="setting-group-label">Skip low-res</span>
                   <select
-                    className="theme-select"
+                    className="setting-select"
                     value={minResolution}
                     onChange={(e) => setMinResolution(Number(e.target.value))}
                   >
@@ -658,174 +828,116 @@ function App() {
                     <option value={1000}>1000px (below HD)</option>
                     <option value={1200}>1200px (below Kindle PW)</option>
                   </select>
-                </label>
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={hideCover}
-                    onChange={(e) => setHideCover(e.target.checked)}
-                  />
-                  Hide Kindle frame
-                </label>
-              </div>
-
-              <div className="setting-group">
-                <span className="setting-group-label">Output</span>
-                <button className="setting-btn" onClick={selectOutputDir}>
-                  Output Folder
-                </button>
-                <span className="filepath">
-                  {outputDir || "Same as input"}
-                </span>
-              </div>
-
-              <div className="setting-group">
-                <span className="setting-group-label">Theme</span>
-                <select
-                  className="theme-select"
-                  value={theme}
-                  onChange={(e) => setTheme(e.target.value)}
-                >
-                  <option value="ember">Ember</option>
-                  <option value="jade">Jade</option>
-                  <option value="iris">Iris</option>
-                  <option value="rose">Rose</option>
-                </select>
-              </div>
-
-              {version && (
-                <div className="version-section">
-                  <span className="version-label">Zagorakys v{version}</span>
-                  {updateAvailable && (
-                    <button
-                      className="update-btn"
-                      disabled={updating}
-                      onClick={async () => {
-                        setUpdating(true);
-                        try {
-                          const update = await check();
-                          if (update?.available) {
-                            await update.downloadAndInstall();
-                            await relaunch();
-                          }
-                        } catch (e) {
-                          setError(String(e));
-                          setUpdating(false);
-                        }
-                      }}
-                    >
-                      {updating ? "Updating..." : `Update to v${updateAvailable.version}`}
-                    </button>
-                  )}
                 </div>
-              )}
-            </div>
-          )}
-          <button
-            className="sidebar-btn"
-            onClick={() => setShowSettings(!showSettings)}
-          >
-            Settings
-          </button>
-        </div>
-      </div>
 
-      <div className="preview-pane">
-        {pageImage ? (
-          <>
-            <div className="preview-nav">
-              <button onClick={firstPage} disabled={currentPage === 0} title="First page">⏮</button>
-              <button onClick={prevPage} disabled={currentPage === 0}>◀</button>
-              <input
-                type="number"
-                className="page-input"
-                min={1}
-                max={mobiInfo?.page_count ?? 1}
-                value={currentPage + 1}
-                onChange={e => {
-                  const val = parseInt(e.target.value, 10);
-                  if (!isNaN(val)) goToPage(val - 1);
-                }}
-              />
-              <span>/ {mobiInfo?.page_count ?? "?"}</span>
-              <button onClick={nextPage} disabled={!mobiInfo || currentPage >= mobiInfo.page_count - 1}>▶</button>
-              <button onClick={lastPage} disabled={!mobiInfo || currentPage >= mobiInfo.page_count - 1} title="Last page">⏭</button>
-              <span className="nav-separator">|</span>
-              <button onClick={zoomOut} disabled={zoom <= 0.25}>−</button>
-              <input
-                type="number"
-                className="zoom-input"
-                min={25}
-                max={300}
-                step={25}
-                value={Math.round(zoom * 100)}
-                onChange={e => {
-                  const val = parseInt(e.target.value, 10);
-                  if (!isNaN(val)) setZoom(Math.max(0.25, Math.min(3, val / 100)));
-                }}
-              />
-              <span className="zoom-label">%</span>
-              <button onClick={zoomIn} disabled={zoom >= 3}>+</button>
-            </div>
-            <div className={`preview-image-container${zoom > 1 ? " zoomed" : ""}`}>
-              <div className="kindle-frame" style={zoom !== 1 ? { transform: `scale(${zoom})`, transformOrigin: zoom > 1 ? '0 0' : 'center center' } : undefined}>
-                {hideCover ? (
-                  <img
-                    src={pageImage}
-                    alt={`Page ${currentPage + 1}`}
-                    className={`preview-bare${loadingPage ? " loading" : ""}`}
-                  />
-                ) : (
-                  <div className="kindle-bezel">
-                    <span className="kindle-label">Kindle</span>
-                    <div className="kindle-screen">
-                      <img
-                        src={pageImage}
-                        alt={`Page ${currentPage + 1}`}
-                        className={loadingPage ? "loading" : ""}
-                      />
-                    </div>
+                <div className="setting-group">
+                  <span className="setting-group-label">Output</span>
+                  <button className="setting-btn" onClick={selectOutputDir}>
+                    Choose Folder
+                  </button>
+                  <span className="setting-path">{outputDir || "Same as input"}</span>
+                </div>
+
+                <div className="setting-group">
+                  <span className="setting-group-label">Theme</span>
+                  <select
+                    className="setting-select"
+                    value={theme}
+                    onChange={(e) => setTheme(e.target.value)}
+                  >
+                    <option value="ember">Ember</option>
+                    <option value="jade">Jade</option>
+                    <option value="iris">Iris</option>
+                    <option value="rose">Rose</option>
+                  </select>
+                </div>
+
+                {version && (
+                  <div className="version-section">
+                    <span className="version-label">Zagorakys v{version}</span>
+                    {updateAvailable && (
+                      <button
+                        className="update-btn"
+                        disabled={updating}
+                        onClick={async () => {
+                          setUpdating(true);
+                          try {
+                            const update = await check();
+                            if (update?.available) {
+                              await update.downloadAndInstall();
+                              await relaunch();
+                            }
+                          } catch (e) {
+                            setError(String(e));
+                            setUpdating(false);
+                          }
+                        }}
+                      >
+                        {updating ? "Updating..." : `Update to v${updateAvailable.version}`}
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
             </div>
-          </>
-        ) : (
-          <div className="preview-empty">
-            <p>Drop files here or select from sidebar</p>
-            <span className="preview-empty-hint">CBR, CBZ, RAR, ZIP, PDF</span>
-          </div>
-        )}
-        <div className="preview-status">
-          {mobiInfo ? (
-            <>
-              <span className="status-title">{shortPath(convertResult?.output_path || mobiPath)}&nbsp;&nbsp;&nbsp;&nbsp;[{mobiInfo.page_count} pages]</span>
-              {convertResult && !convertResult.skipped && !isBatch && convertResult.input_bytes > 0 ? (
-                <>
-                  <span className="status-meta">
-                    {convertResult.input_size} → {convertResult.output_size} ({convertResult.output_bytes <= convertResult.input_bytes ? "−" : "+"}{Math.abs(Math.round((1 - convertResult.output_bytes / convertResult.input_bytes) * 100))}%)
-                  </span>
-                  <span className="status-dict">
-                    {"{"}<em>Quality</em>{`: ${quality}, `}<em>Duration</em>{`: ${convertResult.elapsed}}`}
-                  </span>
-                </>
-              ) : (
-                <span className="status-meta">{mobiInfo.file_size}</span>
-              )}
-            </>
-          ) : (comicPath || isBatch) ? (
-            <span className="status-title">
-              {isBatch ? shortPath(batchFiles[0].replace(/[/\\][^/\\]+$/, "")) : shortPath(comicPath)}
-              {isBatch && <>&nbsp;&nbsp;&nbsp;&nbsp;[{batchFiles.length} files]</>}
-            </span>
-          ) : null}
+          )}
         </div>
-        {dragging && (
-          <div className="drag-overlay">
-            <div className="drag-overlay-content">Drop to convert</div>
-          </div>
-        )}
       </div>
+
+      <div className="status-bar">
+        {mobiInfo ? (
+          <>
+            <span className="status-item">
+              <strong>{shortPath(convertResult?.output_path || mobiPath)}</strong>
+            </span>
+            <span className="status-sep">|</span>
+            {convertResult && !convertResult.skipped && !isBatch && convertResult.input_bytes > 0 ? (
+              <>
+                <span className="status-item">
+                  {convertResult.input_size} → {convertResult.output_size} (
+                  {convertResult.output_bytes <= convertResult.input_bytes ? "−" : "+"}
+                  {Math.abs(
+                    Math.round((1 - convertResult.output_bytes / convertResult.input_bytes) * 100)
+                  )}
+                  %)
+                </span>
+                <span className="status-sep">|</span>
+                <span className="status-item">{mobiInfo.page_count} pages</span>
+                <span className="status-sep">|</span>
+                <span className="status-item">{convertResult.elapsed}</span>
+              </>
+            ) : (
+              <>
+                <span className="status-item">{mobiInfo.file_size}</span>
+                <span className="status-sep">|</span>
+                <span className="status-item">{mobiInfo.page_count} pages</span>
+              </>
+            )}
+          </>
+        ) : (comicPath || isBatch) ? (
+          <>
+            <span className="status-item">
+              <strong>
+                {isBatch
+                  ? shortPath(batchFiles[0].replace(/[/\\][^/\\]+$/, ""))
+                  : shortPath(comicPath)}
+              </strong>
+            </span>
+            {isBatch && (
+              <>
+                <span className="status-sep">|</span>
+                <span className="status-item">{batchFiles.length} files</span>
+              </>
+            )}
+          </>
+        ) : null}
+      </div>
+
+      {dragging && (
+        <div className="drag-overlay">
+          <div className="drag-overlay-content">Drop to convert</div>
+        </div>
+      )}
     </div>
   );
 }
