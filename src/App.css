@@ -967,6 +967,10 @@ body {
   font-weight: 500;
 }
 
+.status-skipped {
+  color: var(--accent-hover);
+}
+
 .status-sep {
   color: var(--border);
 }

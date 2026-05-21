@@ -145,7 +145,7 @@ function App() {
         if (reqId !== pageRequestId.current) return;
         setError(String(e));
       }
-      setLoadingPage(false);
+      if (reqId === pageRequestId.current) setLoadingPage(false);
     },
     [],
   );
@@ -289,7 +289,7 @@ function App() {
         },
       });
       setConvertResult(result);
-      if (result.output_path.endsWith(".mobi") || result.output_path.endsWith(".cbz")) {
+      if (!result.skipped && (result.output_path.endsWith(".mobi") || result.output_path.endsWith(".cbz"))) {
         loadMobi(result.output_path);
       }
     } catch (e) {
@@ -534,7 +534,7 @@ function App() {
           <div className="progress-bar">
             <div
               className="progress-fill"
-              style={{ width: `${Math.round(((batchIndex + (batchResults.length > batchIndex ? 1 : 0)) / batchFiles.length) * 100)}%` }}
+              style={{ width: `${Math.round(((batchIndex + (progressPercent > 0 ? progressPercent / 100 : 0)) / batchFiles.length) * 100)}%` }}
             />
           </div>
           <span className="progress-text">
@@ -923,6 +923,12 @@ function App() {
                   : shortPath(comicPath)}
               </strong>
             </span>
+            {convertResult?.skipped && !isBatch && (
+              <>
+                <span className="status-sep">|</span>
+                <span className="status-item status-skipped">Skipped: {convertResult.skip_reason}</span>
+              </>
+            )}
             {isBatch && (
               <>
                 <span className="status-sep">|</span>

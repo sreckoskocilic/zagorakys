@@ -776,6 +776,114 @@ fn check_source_quality(input_path: &Path, target: u32, split: bool) -> Option<(
     }
 }
 
+fn check_optimize_savings(
+    input_path: &Path,
+    width: u32,
+    height: u32,
+    quality: u8,
+    contrast: bool,
+    grayscale: bool,
+) -> Option<String> {
+    use std::io::Read;
+
+    let archive_type = detect_archive_type(input_path);
+    let sample_count = 5usize;
+
+    let samples: Vec<(usize, Vec<u8>)> = if archive_type == "zip" {
+        let data = fs::read(input_path).ok()?;
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&data)).ok()?;
+        let mut names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let file = archive.by_index(i).ok()?;
+                let name = file.name().to_string();
+                let lower = name.to_lowercase();
+                if is_image_ext(&lower) { Some(name) } else { None }
+            })
+            .collect();
+        names.sort();
+        if names.is_empty() { return None; }
+        let indices = pick_sample_indices(names.len(), sample_count);
+        indices.iter().filter_map(|&i| {
+            let mut file = archive.by_name(&names[i]).ok()?;
+            let compressed = file.compressed_size() as usize;
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).ok()?;
+            Some((compressed, buf))
+        }).collect()
+    } else if archive_type == "rar" {
+        let tmp_dir = tempfile::TempDir::new().ok()?;
+        let unrar = find_unrar()?;
+        let status = std::process::Command::new(&unrar)
+            .args(["e", "-o+", "-inul", "--"])
+            .arg(input_path)
+            .arg(tmp_dir.path())
+            .status()
+            .ok()?;
+        if !status.success() { return None; }
+        let mut imgs: Vec<PathBuf> = fs::read_dir(tmp_dir.path())
+            .ok()?
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                let ext = path.extension()?.to_str()?.to_lowercase();
+                if is_image_ext(&ext) { Some(path) } else { None }
+            })
+            .collect();
+        imgs.sort();
+        if imgs.is_empty() { return None; }
+        let indices = pick_sample_indices(imgs.len(), sample_count);
+        indices.iter().filter_map(|&i| {
+            let size = fs::metadata(&imgs[i]).ok()?.len() as usize;
+            let data = fs::read(&imgs[i]).ok()?;
+            Some((size, data))
+        }).collect()
+    } else {
+        return None;
+    };
+
+    if samples.is_empty() { return None; }
+
+    let mut total_source: usize = 0;
+    let mut total_encoded: usize = 0;
+    let mut fmt_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for (source_size, buf) in &samples {
+        let fmt = image_ext_from_bytes(buf);
+        *fmt_counts.entry(fmt.to_string()).or_insert(0) += 1;
+        let img = match decode_image(buf) {
+            Ok(img) => img,
+            Err(_) => continue,
+        };
+        let resize = img.width() > width || img.height() > height;
+        let encoded = match encode_image(img, width, height, quality, contrast, grayscale, resize) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        total_source += source_size;
+        total_encoded += encoded.len();
+    }
+
+    if total_source == 0 { return None; }
+
+    let ratio_pct = total_encoded * 100 / total_source;
+    let savings_pct = if ratio_pct >= 100 { 0usize } else { 100 - ratio_pct };
+    if savings_pct < 15 {
+        let dominant_fmt = fmt_counts.iter().max_by_key(|(_, c)| *c).map(|(f, _)| f.as_str()).unwrap_or("?");
+        Some(format!("already compact ({dominant_fmt}, ~{savings_pct}% savings across {}/{} samples)", samples.len(), sample_count))
+    } else {
+        None
+    }
+}
+
+fn is_image_ext(s: &str) -> bool {
+    matches!(s.rsplit('.').next().unwrap_or(""),
+        "jpg" | "jpeg" | "png" | "webp" | "bmp" | "gif" | "tif" | "tiff")
+}
+
+fn pick_sample_indices(total: usize, count: usize) -> Vec<usize> {
+    let n = count.min(total);
+    (0..n).map(|i| i * total / n).collect()
+}
+
 fn decode_image(raw: &[u8]) -> Result<image::DynamicImage, String> {
     use image::ImageReader;
     use std::io::Cursor;
@@ -890,12 +998,16 @@ fn optimize_dir_to_cbz(
         .map(|p| fs::read(p).map_err(|e| format!("Cannot read image: {e}")))
         .collect::<Result<_, _>>()?;
 
+    let done = std::sync::atomic::AtomicUsize::new(0);
     let processed: Vec<Result<Vec<Vec<u8>>, String>> = raw_images.par_iter()
         .map(|raw| {
             if cancel.load(Ordering::Relaxed) {
                 return Err("Cancelled".to_string());
             }
-            process_image_split(raw, width, height, quality, contrast, grayscale, resize, split)
+            let result = process_image_split(raw, width, height, quality, contrast, grayscale, resize, split);
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            emit_progress(app, n, total, &format!("Processing {n}/{total}"));
+            result
         })
         .collect();
 
@@ -907,7 +1019,7 @@ fn optimize_dir_to_cbz(
     let mut page_idx = 0;
     for (i, result) in processed.into_iter().enumerate() {
         let pages = result?;
-        emit_progress(app, i + 1, total, &format!("Processing {}/{total}", i + 1));
+        emit_progress(app, i + 1, total, &format!("Writing {}/{total}", i + 1));
         for jpeg_data in pages {
             let out_name = format!("{:04}.jpg", page_idx);
             zip_writer.start_file(&out_name, zip_options)
@@ -1018,12 +1130,16 @@ fn optimize_cbz(
     let total = entries.len();
     emit_progress(app, 0, total, &format!("Processing 0/{total}"));
 
+    let done = std::sync::atomic::AtomicUsize::new(0);
     let processed: Vec<Result<Vec<Vec<u8>>, String>> = entries.par_iter()
         .map(|(_name, raw)| {
             if cancel.load(Ordering::Relaxed) {
                 return Err("Cancelled".to_string());
             }
-            process_image_split(raw, width, height, quality, contrast, grayscale, resize, split)
+            let result = process_image_split(raw, width, height, quality, contrast, grayscale, resize, split);
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            emit_progress(app, n, total, &format!("Processing {n}/{total}"));
+            result
         })
         .collect();
 
@@ -1035,7 +1151,7 @@ fn optimize_cbz(
     let mut page_idx = 0;
     for (i, result) in processed.into_iter().enumerate() {
         let pages = result?;
-        emit_progress(app, i + 1, total, &format!("Processing {}/{total}", i + 1));
+        emit_progress(app, i + 1, total, &format!("Writing {}/{total}", i + 1));
         for jpeg_data in pages {
             let out_name = format!("{:04}.jpg", page_idx);
             zip_writer.start_file(&out_name, zip_options)
@@ -1112,7 +1228,7 @@ pub async fn convert_comic(
         expected_output
     };
 
-    cache.0.lock().unwrap_or_else(|p| p.into_inner()).remove(&expected_output);
+    cache.0.lock().unwrap_or_else(|p| p.into_inner()).remove(&input_path);
 
     let is_optimize = options.device == "optimize";
     let quality = options.quality.clamp(1, 100);
@@ -1141,7 +1257,7 @@ pub async fn convert_comic(
             };
             emit_progress(&app, 0, 1, &format!("Skipped: {reason}"));
             return Ok(ConvertResult {
-                output_path: expected_output.to_string_lossy().to_string(),
+                output_path: input_path.to_string_lossy().to_string(),
                 output_size: String::new(),
                 input_size,
                 input_bytes,
@@ -1156,6 +1272,26 @@ pub async fn convert_comic(
 
     let grayscale = if is_optimize { !options.preserve_color } else { true };
     let resize = true;
+
+    if is_optimize && !is_pdf {
+        if let Some(reason) = check_optimize_savings(
+            &input_path, dev_w, dev_h, quality, options.contrast, grayscale,
+        ) {
+            emit_progress(&app, 0, 1, &format!("Skipped: {reason}"));
+            return Ok(ConvertResult {
+                output_path: input_path.to_string_lossy().to_string(),
+                output_size: String::new(),
+                input_size,
+                input_bytes,
+                output_bytes: 0,
+                title,
+                elapsed: "0.0s".to_string(),
+                skipped: true,
+                skip_reason: reason,
+            });
+        }
+    }
+
     let output_path = if is_cbz_output(&options.device) {
         let cbz_path = expected_output.clone();
         if is_pdf {
@@ -1512,4 +1648,15 @@ mod tests {
     fn format_size_gigabytes() {
         assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.0 GB");
     }
+
+    #[test]
+    fn optimize_skips_compact_source() {
+        // Requires local test file; silently passes if absent
+        let path = std::path::Path::new("/Users/skocho/Downloads/Alan Ford/Alan Ford 001 - Grupa Tnt(1969).cbz");
+        if !path.exists() { return; }
+        let result = check_optimize_savings(path, 2048, 2048, 10, false, true);
+        assert!(result.is_some(), "WebP source should skip — JPEG output would be larger");
+    }
+
+
 }
