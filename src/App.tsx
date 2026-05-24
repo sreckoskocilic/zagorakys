@@ -80,6 +80,10 @@ function App() {
     return v ? Number(v) : 0;
   });
   const [hideCover, setHideCover] = useState(() => localStorage.getItem("zagorakys-hidecover") === "true");
+  const [maxImageDim, setMaxImageDim] = useState(() => {
+    const v = localStorage.getItem("zagorakys-max-image-dim");
+    return v ? Number(v) : 1500;
+  });
   const cancelRef = useRef(false);
   const pageRequestId = useRef(0);
 
@@ -114,6 +118,7 @@ function App() {
   useEffect(() => { localStorage.setItem("zagorakys-preserve-color", String(preserveColor)); }, [preserveColor]);
   useEffect(() => { localStorage.setItem("zagorakys-min-resolution", String(minResolution)); }, [minResolution]);
   useEffect(() => { localStorage.setItem("zagorakys-hidecover", String(hideCover)); }, [hideCover]);
+  useEffect(() => { localStorage.setItem("zagorakys-max-image-dim", String(maxImageDim)); }, [maxImageDim]);
   useEffect(() => { localStorage.setItem("zagorakys-outputdir", outputDir); }, [outputDir]);
 
   useEffect(() => {
@@ -245,9 +250,9 @@ function App() {
   const selectComic = async () => {
     const selected = await open({
       multiple: false,
-      filters: [
-        { name: "Comic Archives", extensions: ["cbr", "cbz", "rar", "zip", "pdf"] },
-      ],
+      filters: device === "pdf-optimize"
+        ? [{ name: "PDF Files", extensions: ["pdf"] }]
+        : [{ name: "Comic Archives", extensions: ["cbr", "cbz", "rar", "zip", "pdf"] }],
     });
     if (selected) {
       setComicPath(selected as string);
@@ -281,11 +286,12 @@ function App() {
           output_dir: dir,
           quality: typeof quality === "number" && quality >= 1 ? quality : 20,
           contrast,
-          no_split: device === "optimize" ? true : noSplit,
+          no_split: device === "optimize" || device === "pdf-optimize" ? true : noSplit,
           device,
           skip_existing: skipExisting,
-          preserve_color: device === "optimize" ? preserveColor : false,
+          preserve_color: device === "optimize" || device === "pdf-optimize" ? preserveColor : false,
           min_resolution: minResolution,
+          max_image_dim: device === "pdf-optimize" ? maxImageDim : 0,
         },
       });
       setConvertResult(result);
@@ -343,11 +349,12 @@ function App() {
             output_dir: dir,
             quality: typeof quality === "number" && quality >= 1 ? quality : 20,
             contrast,
-            no_split: device === "optimize" ? true : noSplit,
+            no_split: device === "optimize" || device === "pdf-optimize" ? true : noSplit,
             device,
             skip_existing: skipExisting,
-            preserve_color: device === "optimize" ? preserveColor : false,
+            preserve_color: device === "optimize" || device === "pdf-optimize" ? preserveColor : false,
             min_resolution: minResolution,
+            max_image_dim: device === "pdf-optimize" ? maxImageDim : 0,
           },
         });
         results.push(result);
@@ -449,7 +456,8 @@ function App() {
   };
 
   const convertLabel = () => {
-    if (isBatch) return `${device === "optimize" ? "Optimize" : "Convert"} ${batchFiles.length} Files`;
+    if (isBatch) return `${device === "optimize" || device === "pdf-optimize" ? "Optimize" : "Convert"} ${batchFiles.length} Files`;
+    if (device === "pdf-optimize") return "Optimize PDF";
     if (device === "optimize") return "Optimize";
     return device.startsWith("kobo") ? "Convert to CBZ" : "Convert to MOBI";
   };
@@ -481,6 +489,7 @@ function App() {
           <option value="kindle-oasis">Kindle Oasis (1264×1680)</option>
           <option value="kobo-clara-hd">Kobo Clara HD (1072×1448)</option>
           <option value="optimize">Optimize (reduce size)</option>
+          <option value="pdf-optimize">PDF Optimize (reduce PDF size)</option>
         </select>
 
         <div className="toolbar-div" />
@@ -664,7 +673,7 @@ function App() {
           <div className="drop-zone">
             <div className="dz-icon">&#8681;</div>
             <div className="dz-text">Drop files or folders</div>
-            <div className="dz-hint">CBR CBZ RAR ZIP PDF</div>
+            <div className="dz-hint">{device === "pdf-optimize" ? "PDF" : "CBR CBZ RAR ZIP PDF"}</div>
           </div>
         </div>
 
@@ -777,7 +786,7 @@ function App() {
                     />
                     Enhance contrast
                   </label>
-                  {!device.startsWith("kobo") && device !== "optimize" && (
+                  {!device.startsWith("kobo") && device !== "optimize" && device !== "pdf-optimize" && (
                     <label className="checkbox-label">
                       <input
                         type="checkbox"
@@ -787,7 +796,7 @@ function App() {
                       Don't split double pages
                     </label>
                   )}
-                  {device === "optimize" && (
+                  {(device === "optimize" || device === "pdf-optimize") && (
                     <label className="checkbox-label">
                       <input
                         type="checkbox"
@@ -815,20 +824,38 @@ function App() {
                   </label>
                 </div>
 
-                <div className="setting-group">
-                  <span className="setting-group-label">Skip low-res</span>
-                  <select
-                    className="setting-select"
-                    value={minResolution}
-                    onChange={(e) => setMinResolution(Number(e.target.value))}
-                  >
-                    <option value={0}>Off</option>
-                    <option value={600}>600px (web scans)</option>
-                    <option value={800}>800px (low quality)</option>
-                    <option value={1000}>1000px (below HD)</option>
-                    <option value={1200}>1200px (below Kindle PW)</option>
-                  </select>
-                </div>
+                {device !== "pdf-optimize" && (
+                  <div className="setting-group">
+                    <span className="setting-group-label">Skip low-res</span>
+                    <select
+                      className="setting-select"
+                      value={minResolution}
+                      onChange={(e) => setMinResolution(Number(e.target.value))}
+                    >
+                      <option value={0}>Off</option>
+                      <option value={600}>600px (web scans)</option>
+                      <option value={800}>800px (low quality)</option>
+                      <option value={1000}>1000px (below HD)</option>
+                      <option value={1200}>1200px (below Kindle PW)</option>
+                    </select>
+                  </div>
+                )}
+
+                {device === "pdf-optimize" && (
+                  <div className="setting-group">
+                    <span className="setting-group-label">Max image size</span>
+                    <select
+                      className="setting-select"
+                      value={maxImageDim}
+                      onChange={(e) => setMaxImageDim(Number(e.target.value))}
+                    >
+                      <option value={0}>No resize</option>
+                      <option value={1024}>1024px (compact)</option>
+                      <option value={1500}>1500px (balanced)</option>
+                      <option value={2048}>2048px (quality)</option>
+                    </select>
+                  </div>
+                )}
 
                 <div className="setting-group">
                   <span className="setting-group-label">Output</span>

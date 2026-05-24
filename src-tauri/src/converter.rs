@@ -18,6 +18,7 @@ fn device_profile(device: &str) -> (u32, u32, &'static str) {
         "kindle-paperwhite" => (1072, 1448, "kindle_pw"),
         "kindle-oasis" => (1264, 1680, "kindle_oasis"),
         "optimize" => (2048, 2048, "optimized"),
+        "pdf-optimize" => (1500, 1500, "pdf_optimized"),
         _ => (600, 800, "kindle4"),
     }
 }
@@ -40,6 +41,8 @@ pub struct ConvertOptions {
     pub preserve_color: bool,
     #[serde(default)]
     pub min_resolution: u32,
+    #[serde(default)]
+    pub max_image_dim: u32,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1166,6 +1169,223 @@ fn optimize_cbz(
     Ok(())
 }
 
+fn optimize_pdf_file(
+    input_path: &Path,
+    output_path: &Path,
+    quality: u8,
+    grayscale: bool,
+    max_dim: u32,
+    cancel: &AtomicBool,
+    app: &AppHandle,
+) -> Result<(), String> {
+    emit_progress(app, 0, 1, "Loading PDF...");
+
+    let mut doc = lopdf::Document::load(input_path)
+        .map_err(|e| format!("Cannot load PDF: {e}"))?;
+
+    let image_ids: Vec<lopdf::ObjectId> = doc
+        .objects
+        .iter()
+        .filter_map(|(id, obj)| {
+            if let lopdf::Object::Stream(stream) = obj {
+                let subtype = stream
+                    .dict
+                    .get(b"Subtype")
+                    .ok()
+                    .and_then(|o| o.as_name().ok())
+                    .unwrap_or(b"");
+                if subtype == b"Image" {
+                    return Some(*id);
+                }
+            }
+            None
+        })
+        .collect();
+
+    let total = image_ids.len();
+    if total == 0 {
+        doc.save(output_path).map_err(|e| format!("Cannot save PDF: {e}"))?;
+        return Ok(());
+    }
+
+    emit_progress(app, 0, total, &format!("Found {total} images in PDF"));
+
+    let mut optimized = 0usize;
+    let mut saved_bytes: i64 = 0;
+
+    for (i, id) in image_ids.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Cancelled".to_string());
+        }
+
+        match recompress_pdf_image(&mut doc, *id, quality, grayscale, max_dim) {
+            Ok(diff) if diff > 0 => {
+                optimized += 1;
+                saved_bytes += diff;
+            }
+            _ => {}
+        }
+
+        emit_progress(app, i + 1, total, &format!("Optimizing {}/{total}", i + 1));
+    }
+
+    emit_progress(
+        app,
+        total,
+        total,
+        &format!(
+            "Saving PDF ({optimized} images optimized, saved ~{})",
+            format_size(saved_bytes.max(0) as usize)
+        ),
+    );
+
+    doc.save(output_path).map_err(|e| format!("Cannot save PDF: {e}"))?;
+    Ok(())
+}
+
+fn recompress_pdf_image(
+    doc: &mut lopdf::Document,
+    id: lopdf::ObjectId,
+    quality: u8,
+    grayscale: bool,
+    max_dim: u32,
+) -> Result<i64, String> {
+    let (width, height, filter_bytes, bpc, cs_name, original_len) = {
+        let stream = match doc.objects.get(&id) {
+            Some(lopdf::Object::Stream(s)) => s,
+            _ => return Err("Not a stream".to_string()),
+        };
+
+        let w = stream
+            .dict
+            .get(b"Width")
+            .ok()
+            .and_then(|o| o.as_i64().ok())
+            .unwrap_or(0) as u32;
+        let h = stream
+            .dict
+            .get(b"Height")
+            .ok()
+            .and_then(|o| o.as_i64().ok())
+            .unwrap_or(0) as u32;
+        let filter = stream
+            .dict
+            .get(b"Filter")
+            .ok()
+            .and_then(|o| o.as_name().ok())
+            .map(|n| n.to_vec());
+        let bpc = stream
+            .dict
+            .get(b"BitsPerComponent")
+            .ok()
+            .and_then(|o| o.as_i64().ok())
+            .unwrap_or(8) as u32;
+        let cs = stream
+            .dict
+            .get(b"ColorSpace")
+            .ok()
+            .and_then(|o| o.as_name().ok())
+            .map(|n| n.to_vec());
+
+        (w, h, filter, bpc, cs, stream.content.len())
+    };
+
+    if width < 64 || height < 64 {
+        return Ok(0);
+    }
+
+    let filter_name = filter_bytes.as_deref();
+
+    let img = match filter_name {
+        Some(b"DCTDecode") => {
+            let jpeg_data = match doc.objects.get(&id) {
+                Some(lopdf::Object::Stream(s)) => s.content.clone(),
+                _ => return Err("Not a stream".to_string()),
+            };
+            decode_image(&jpeg_data)?
+        }
+        Some(b"FlateDecode") => {
+            if bpc != 8 {
+                return Err(format!("Unsupported BPC: {bpc}"));
+            }
+            let channels: u32 = match cs_name.as_deref() {
+                Some(b"DeviceRGB") => 3,
+                Some(b"DeviceGray") => 1,
+                _ => return Err("Unsupported color space".to_string()),
+            };
+
+            let raw = {
+                let stream = match doc.objects.get(&id) {
+                    Some(lopdf::Object::Stream(s)) => s,
+                    _ => return Err("Not a stream".to_string()),
+                };
+                let mut cloned = stream.clone();
+                cloned.decompress();
+                cloned.content
+            };
+
+            let expected = (width * height * channels) as usize;
+            if raw.len() < expected {
+                return Err("Data too short".to_string());
+            }
+
+            if channels == 3 {
+                image::DynamicImage::ImageRgb8(
+                    image::RgbImage::from_raw(width, height, raw[..expected].to_vec())
+                        .ok_or("Cannot create RGB image")?,
+                )
+            } else {
+                image::DynamicImage::ImageLuma8(
+                    image::GrayImage::from_raw(width, height, raw[..expected].to_vec())
+                        .ok_or("Cannot create gray image")?,
+                )
+            }
+        }
+        _ => return Err("Unsupported filter".to_string()),
+    };
+
+    let needs_resize = max_dim > 0 && (img.width() > max_dim || img.height() > max_dim);
+    let (new_w, new_h) = if needs_resize {
+        let ratio =
+            (max_dim as f64 / img.width() as f64).min(max_dim as f64 / img.height() as f64);
+        (
+            (img.width() as f64 * ratio).round().max(1.0) as u32,
+            (img.height() as f64 * ratio).round().max(1.0) as u32,
+        )
+    } else {
+        (img.width(), img.height())
+    };
+
+    let encoded = encode_image(img, max_dim, max_dim, quality, false, grayscale, needs_resize)?;
+
+    if encoded.len() >= original_len {
+        return Ok(0);
+    }
+
+    let diff = original_len as i64 - encoded.len() as i64;
+
+    if let Some(lopdf::Object::Stream(ref mut s)) = doc.objects.get_mut(&id) {
+        s.content = encoded;
+        s.dict.set("Filter", lopdf::Object::Name(b"DCTDecode".to_vec()));
+        s.dict.remove(b"DecodeParms");
+        if needs_resize {
+            s.dict
+                .set("Width", lopdf::Object::Integer(new_w as i64));
+            s.dict
+                .set("Height", lopdf::Object::Integer(new_h as i64));
+        }
+        if grayscale {
+            s.dict.set(
+                "ColorSpace",
+                lopdf::Object::Name(b"DeviceGray".to_vec()),
+            );
+        }
+        s.allows_compression = false;
+    }
+
+    Ok(diff)
+}
+
 #[command]
 pub async fn convert_comic(
     app: AppHandle,
@@ -1187,9 +1407,10 @@ pub async fn convert_comic(
         .to_string();
 
     let (dev_w, dev_h, dev_name) = device_profile(&options.device);
+    let is_optimize = options.device == "optimize" || options.device == "pdf-optimize";
 
-    let output_ext = if is_cbz_output(&options.device) { "cbz" } else { "mobi" };
-    let base_name = if options.device == "optimize" {
+    let output_ext = if options.device == "pdf-optimize" { "pdf" } else if is_cbz_output(&options.device) { "cbz" } else { "mobi" };
+    let base_name = if is_optimize {
         format!("{title}_optimized")
     } else {
         title.clone()
@@ -1212,7 +1433,7 @@ pub async fn convert_comic(
         });
     }
 
-    let expected_output = if options.device == "optimize" && expected_output.exists() {
+    let expected_output = if is_optimize && expected_output.exists() {
         let mut counter = 1;
         loop {
             let candidate = output_dir.join(format!("{base_name}_{counter}.{output_ext}"));
@@ -1230,7 +1451,6 @@ pub async fn convert_comic(
 
     cache.0.lock().unwrap_or_else(|p| p.into_inner()).remove(&input_path);
 
-    let is_optimize = options.device == "optimize";
     let quality = options.quality.clamp(1, 100);
     let input_bytes = fs::metadata(&input_path).map(|m| m.len() as usize).unwrap_or(0);
     let input_size = format_size(input_bytes);
@@ -1292,7 +1512,16 @@ pub async fn convert_comic(
         }
     }
 
-    let output_path = if is_cbz_output(&options.device) {
+    let output_path = if options.device == "pdf-optimize" {
+        if !is_pdf {
+            return Err("PDF Optimize only works with PDF files".to_string());
+        }
+        let pdf_path = expected_output.clone();
+        let max_dim = if options.max_image_dim > 0 { options.max_image_dim } else { dev_w };
+        optimize_pdf_file(&input_path, &pdf_path, quality, grayscale, max_dim, &cancel.0, &app)
+            .map_err(|e| { let _ = fs::remove_file(&pdf_path); e })?;
+        pdf_path
+    } else if is_cbz_output(&options.device) {
         let cbz_path = expected_output.clone();
         if is_pdf {
             let tmp_dir = tempfile::TempDir::new()
