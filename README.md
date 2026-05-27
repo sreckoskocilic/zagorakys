@@ -14,7 +14,7 @@ Supports CBR, CBZ, RAR, ZIP, and PDF files.
 
 1. Open the app
 2. Pick a comic with **+ File**, or a folder with **+ Folder** for batch
-3. Choose your device and quality from the toolbar (Kindle 4, Paperwhite, Oasis, Kobo Clara HD, or Optimize)
+3. Choose your device and quality from the toolbar (Kindle 4, Paperwhite, Oasis, Kobo Clara HD, Optimize, or PDF Optimize)
 4. Hit convert
 5. Output goes next to the original, or wherever you set the output folder
 
@@ -26,7 +26,7 @@ You can also open any `.mobi` or `.cbz` with **Open Book** to just preview witho
 
 ## Toolbar
 
-- **Device** — your e-reader model, or Optimize (reduce size)
+- **Device** — your e-reader model, Optimize (reduce size), or PDF Optimize (reduce PDF size)
 - **Quality** — JPEG quality preset: Low (10), Standard (20), High (40), Maximum (80)
 
 ## Settings
@@ -38,4 +38,5 @@ You can also open any `.mobi` or `.cbz` with **Open Book** to just preview witho
 - **Skip already converted** — skip files that already have output in target folder
 - **Skip low-res** — skip images below a minimum resolution
 - **Hide Kindle frame** — hide the bezel in the previewer
+- **Max image size** — resize limit when optimizing PDFs (No resize, 1024px, 1500px, 2048px)
 - **Theme** — Ember, Jade, Iris, or Rose

@@ -1,6 +1,6 @@
 mod converter;
 
-use converter::{cancel_convert, check_is_dir, convert_comic, get_mobi_info, get_mobi_page, get_version, list_comics, ConvertCancel, MobiCache};
+use converter::{cancel_convert, check_is_dir, convert_comic, get_mobi_info, get_mobi_page, get_version, list_comics, reset_cancel, ConvertCancel, MobiCache};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
@@ -20,6 +20,7 @@ pub fn run() {
             get_mobi_page,
             convert_comic,
             cancel_convert,
+            reset_cancel,
             list_comics,
             get_version,
         ])

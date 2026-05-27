@@ -85,6 +85,7 @@ function App() {
     return v ? Number(v) : 1500;
   });
   const cancelRef = useRef(false);
+  const batchGeneration = useRef(0);
   const pageRequestId = useRef(0);
 
   const [mobiPath, setMobiPath] = useState("");
@@ -149,8 +150,9 @@ function App() {
       } catch (e) {
         if (reqId !== pageRequestId.current) return;
         setError(String(e));
+      } finally {
+        if (reqId === pageRequestId.current) setLoadingPage(false);
       }
-      if (reqId === pageRequestId.current) setLoadingPage(false);
     },
     [],
   );
@@ -279,6 +281,7 @@ function App() {
     setError("");
     setConvertResult(null);
     setProgress(null);
+    await invoke("reset_cancel");
     try {
       const result = await invoke<ConvertResult>("convert_comic", {
         options: {
@@ -330,6 +333,8 @@ function App() {
     const dir = outputDir || batchFiles[0].replace(/[/\\][^/\\]+$/, "") || batchFiles[0];
     setConverting(true);
     cancelRef.current = false;
+    const gen = ++batchGeneration.current;
+    await invoke("reset_cancel");
     setError("");
     setBatchResults([]);
     setBatchErrors([]);
@@ -339,7 +344,7 @@ function App() {
     const results: ConvertResult[] = [];
     const errors: string[] = [];
     for (let i = 0; i < batchFiles.length; i++) {
-      if (cancelRef.current) break;
+      if (cancelRef.current || gen !== batchGeneration.current) break;
       setBatchIndex(i);
       setProgress({ current: i, total: batchFiles.length, message: `${fileName(batchFiles[i])} (${i + 1}/${batchFiles.length})` });
       try {

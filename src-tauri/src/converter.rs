@@ -627,13 +627,21 @@ fn find_tool(candidates: &[&str]) -> Option<PathBuf> {
         if let Some(dir) = exe.parent() {
             for &name in candidates {
                 if let Some(basename) = Path::new(name).file_name() {
-                    let p = dir.join(basename);
-                    if p.exists() {
-                        return Some(p);
-                    }
-                    let p = dir.join("resources").join(basename);
-                    if p.exists() {
-                        return Some(p);
+                    let base_str = basename.to_string_lossy();
+                    let names: Vec<std::ffi::OsString> = if !base_str.contains('.') {
+                        vec![basename.to_os_string(), std::ffi::OsString::from(format!("{base_str}.exe"))]
+                    } else {
+                        vec![basename.to_os_string()]
+                    };
+                    for n in &names {
+                        let p = dir.join(n);
+                        if p.exists() {
+                            return Some(p);
+                        }
+                        let p = dir.join("resources").join(n);
+                        if p.exists() {
+                            return Some(p);
+                        }
                     }
                 }
             }
@@ -716,7 +724,7 @@ fn check_source_quality(input_path: &Path, target: u32, split: bool) -> Option<(
         let (w, h) = peek_image_dimensions(buf)?;
         let landscape = w > h;
         let effective_w = if landscape && split { w / 2 } else { w };
-        let too_small = target > 0 && effective_w < target && h < target;
+        let too_small = target > 0 && (effective_w < target || h < target);
         if too_small {
             Some((w, h, landscape))
         } else {
@@ -1048,6 +1056,12 @@ pub async fn cancel_convert(cancel: tauri::State<'_, ConvertCancel>) -> Result<(
     Ok(())
 }
 
+#[command]
+pub async fn reset_cancel(cancel: tauri::State<'_, ConvertCancel>) -> Result<(), String> {
+    cancel.0.store(false, Ordering::Relaxed);
+    Ok(())
+}
+
 fn optimize_cbz(
     input_path: &Path,
     output_path: &Path,
@@ -1261,12 +1275,14 @@ fn recompress_pdf_image(
             .get(b"Width")
             .ok()
             .and_then(|o| o.as_i64().ok())
+            .filter(|&v| v > 0 && v <= 65535)
             .unwrap_or(0) as u32;
         let h = stream
             .dict
             .get(b"Height")
             .ok()
             .and_then(|o| o.as_i64().ok())
+            .filter(|&v| v > 0 && v <= 65535)
             .unwrap_or(0) as u32;
         let filter = stream
             .dict
@@ -1324,7 +1340,10 @@ fn recompress_pdf_image(
                 cloned.content
             };
 
-            let expected = (width * height * channels) as usize;
+            let expected = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|x| x.checked_mul(channels as usize))
+                .ok_or_else(|| "Image dimensions overflow".to_string())?;
             if raw.len() < expected {
                 return Err("Data too short".to_string());
             }
@@ -1393,7 +1412,6 @@ pub async fn convert_comic(
     cache: tauri::State<'_, MobiCache>,
     cancel: tauri::State<'_, ConvertCancel>,
 ) -> Result<ConvertResult, String> {
-    cancel.0.store(false, Ordering::Relaxed);
     let input_path = PathBuf::from(&options.input_path);
     let output_dir = fs::canonicalize(&options.output_dir)
         .unwrap_or_else(|_| PathBuf::from(&options.output_dir));
@@ -1599,6 +1617,8 @@ pub async fn convert_comic(
 
         mobi_path
     };
+
+    cache.0.lock().unwrap_or_else(|p| p.into_inner()).remove(&output_path);
 
     let output_bytes = fs::metadata(&output_path).map(|m| m.len() as usize).unwrap_or(0);
     let output_size = format_size(output_bytes);
