@@ -64,6 +64,7 @@ function App() {
   const [error, setError] = useState("");
   const [convertResult, setConvertResult] = useState<ConvertResult | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [noSplit, setNoSplit] = useState(() => localStorage.getItem("zagorakys-nosplit") === "true");
   const [device, setDevice] = useState(() => localStorage.getItem("zagorakys-device") || "kindle4");
   const [batchFiles, setBatchFiles] = useState<string[]>([]);
@@ -174,7 +175,13 @@ function App() {
   }, [loadPage]);
 
   useEffect(() => {
-    const exts = ["cbr", "cbz", "rar", "zip", "pdf", "mobi"];
+    // Accepted input extensions depend on the mode: PDF Optimize takes PDFs
+    // only; every other mode takes the comic archive formats. ".mobi" is always
+    // droppable since it opens in the previewer rather than converting.
+    const convertExts = device === "pdf-optimize"
+      ? ["pdf"]
+      : ["cbr", "cbz", "rar", "zip", "pdf"];
+    const exts = [...convertExts, "mobi"];
     const getExt = (p: string) => {
       const dot = p.lastIndexOf(".");
       const sep = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
@@ -186,9 +193,10 @@ function App() {
         const isDir = await invoke<boolean>("check_is_dir", { path: paths[0] });
         if (isDir) {
           try {
-            const comics = await invoke<string[]>("list_comics", { dir: paths[0] });
+            const found = await invoke<string[]>("list_comics", { dir: paths[0] });
+            const comics = found.filter((p) => convertExts.includes(getExt(p)));
             if (comics.length === 0) {
-              setError("No comic files found in folder");
+              setError(device === "pdf-optimize" ? "No PDF files found in folder" : "No comic files found in folder");
               return;
             }
             setComicPath("");
@@ -247,7 +255,7 @@ function App() {
       }
     });
     return () => { unlisten.then((f) => f()); };
-  }, [outputDir, loadMobi]);
+  }, [outputDir, loadMobi, device]);
 
   const selectComic = async () => {
     const selected = await open({
@@ -482,19 +490,25 @@ function App() {
       )}
 
       <div className="toolbar">
-        <span className="toolbar-label">Device</span>
+        <span className="toolbar-label">Output</span>
         <select
           className="toolbar-select"
           value={device}
           onChange={(e) => setDevice(e.target.value)}
           disabled={converting}
         >
-          <option value="kindle4">Kindle 4 (600×800)</option>
-          <option value="kindle-paperwhite">Kindle Paperwhite (1072×1448)</option>
-          <option value="kindle-oasis">Kindle Oasis (1264×1680)</option>
-          <option value="kobo-clara-hd">Kobo Clara HD (1072×1448)</option>
-          <option value="optimize">Optimize (reduce size)</option>
-          <option value="pdf-optimize">PDF Optimize (reduce PDF size)</option>
+          <optgroup label="Kindle (MOBI)">
+            <option value="kindle4">Kindle 4 (600×800)</option>
+            <option value="kindle-paperwhite">Kindle Paperwhite (1072×1448)</option>
+            <option value="kindle-oasis">Kindle Oasis (1264×1680)</option>
+          </optgroup>
+          <optgroup label="Kobo (CBZ)">
+            <option value="kobo-clara-hd">Kobo Clara HD (1072×1448)</option>
+          </optgroup>
+          <optgroup label="Optimize (smaller file, same format)">
+            <option value="optimize">Comic → smaller CBZ</option>
+            <option value="pdf-optimize">PDF → smaller PDF</option>
+          </optgroup>
         </select>
 
         <div className="toolbar-div" />
@@ -528,9 +542,16 @@ function App() {
         </button>
         <button
           className={`toolbar-btn gear${showSettings ? " active" : ""}`}
-          onClick={() => setShowSettings(!showSettings)}
+          onClick={() => { setShowSettings(!showSettings); setShowHelp(false); }}
         >
           &#9881;
+        </button>
+        <button
+          className={`toolbar-btn gear${showHelp ? " active" : ""}`}
+          onClick={() => { setShowHelp(!showHelp); setShowSettings(false); }}
+          title="Help"
+        >
+          ?
         </button>
       </div>
 
@@ -913,6 +934,36 @@ function App() {
               </div>
             </div>
           )}
+          {showHelp && (
+            <div className="settings-slide">
+              <div className="settings-header">
+                <span className="settings-title">Help</span>
+                <button className="settings-close" onClick={() => setShowHelp(false)}>
+                  &times;
+                </button>
+              </div>
+              <div className="settings-body">
+                <div className="setting-group">
+                  <span className="setting-group-label">Output modes</span>
+                  <p className="help-text"><strong>Kindle</strong> converts to a MOBI sized for the chosen device.</p>
+                  <p className="help-text"><strong>Kobo</strong> converts to a device-sized CBZ.</p>
+                  <p className="help-text"><strong>Optimize</strong> re-compresses pages to shrink the file while keeping the format: a comic becomes a smaller CBZ, a PDF a smaller PDF.</p>
+                </div>
+                <div className="setting-group">
+                  <span className="setting-group-label">Input</span>
+                  <p className="help-text">Drop or pick CBR, CBZ, RAR, ZIP, or PDF. PDF Optimize accepts PDFs only. Drop a folder to batch-convert its contents, or drop a MOBI/CBZ to read it in the previewer.</p>
+                </div>
+                <div className="setting-group">
+                  <span className="setting-group-label">Quality</span>
+                  <p className="help-text">Lower quality means smaller files. In Optimize, a page is replaced only when re-compression actually makes it smaller, so already-compact files may change little.</p>
+                </div>
+                <div className="setting-group">
+                  <span className="setting-group-label">Requirements</span>
+                  <p className="help-text">CBR/RAR need unrar; PDF needs mutool or pdftoppm. On Windows both ship with the app.</p>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -959,6 +1010,21 @@ function App() {
               <>
                 <span className="status-sep">|</span>
                 <span className="status-item status-skipped">Skipped: {convertResult.skip_reason}</span>
+              </>
+            )}
+            {convertResult && !convertResult.skipped && !isBatch && convertResult.input_bytes > 0 && (
+              <>
+                <span className="status-sep">|</span>
+                <span className="status-item">
+                  {convertResult.input_size} → {convertResult.output_size} (
+                  {convertResult.output_bytes <= convertResult.input_bytes ? "−" : "+"}
+                  {Math.abs(
+                    Math.round((1 - convertResult.output_bytes / convertResult.input_bytes) * 100)
+                  )}
+                  %)
+                </span>
+                <span className="status-sep">|</span>
+                <span className="status-item">{convertResult.elapsed}</span>
               </>
             )}
             {isBatch && (

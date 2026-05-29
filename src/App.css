@@ -906,6 +906,18 @@ body {
   white-space: nowrap;
 }
 
+.help-text {
+  color: var(--text-mid);
+  font-size: 15px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.help-text strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .version-section {
   display: flex;
   flex-direction: column;

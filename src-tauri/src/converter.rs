@@ -27,6 +27,53 @@ fn is_cbz_output(device: &str) -> bool {
     device.starts_with("kobo") || device == "optimize"
 }
 
+/// Natural (human) order comparison: numeric runs compared by value, not
+/// lexicographically, so `2.jpg` sorts before `10.jpg`. Text runs compared
+/// case-insensitively. Keeps page order correct for non-zero-padded archives.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+    loop {
+        match (ai.peek().copied(), bi.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(ca), Some(cb)) => {
+                if ca.is_ascii_digit() && cb.is_ascii_digit() {
+                    let mut na = String::new();
+                    while let Some(c) = ai.peek().copied() {
+                        if !c.is_ascii_digit() { break; }
+                        na.push(c);
+                        ai.next();
+                    }
+                    let mut nb = String::new();
+                    while let Some(c) = bi.peek().copied() {
+                        if !c.is_ascii_digit() { break; }
+                        nb.push(c);
+                        bi.next();
+                    }
+                    let ta = na.trim_start_matches('0');
+                    let tb = nb.trim_start_matches('0');
+                    let ord = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb));
+                    if ord != Ordering::Equal { return ord; }
+                    // Equal value: fewer leading zeros first, for stable order.
+                    let ord = na.len().cmp(&nb.len());
+                    if ord != Ordering::Equal { return ord; }
+                } else {
+                    let ord = ca
+                        .to_ascii_lowercase()
+                        .cmp(&cb.to_ascii_lowercase())
+                        .then_with(|| ca.cmp(&cb));
+                    if ord != Ordering::Equal { return ord; }
+                    ai.next();
+                    bi.next();
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConvertOptions {
     pub input_path: String,
@@ -108,7 +155,7 @@ pub async fn list_comics(dir: String) -> Result<Vec<String>, String> {
             }
         })
         .collect();
-    comics.sort();
+    comics.sort_by(|a, b| natural_cmp(a, b));
     Ok(comics)
 }
 
@@ -248,7 +295,7 @@ fn extract_images_from_cbz(path: &Path) -> Result<Vec<Vec<u8>>, String> {
             }
         })
         .collect();
-    names.sort();
+    names.sort_by(|a, b| natural_cmp(a, b));
 
     let mut images = Vec::new();
     for name in &names {
@@ -376,7 +423,7 @@ fn detect_archive_type(path: &Path) -> &'static str {
 
 fn is_zip_out_of_order(names: &[String]) -> bool {
     let mut sorted = names.to_vec();
-    sorted.sort();
+    sorted.sort_by(|a, b| natural_cmp(a, b));
     names != sorted
 }
 
@@ -411,7 +458,7 @@ fn extract_archive_to_dir(input_path: &Path, dest_dir: &Path) -> Result<(usize, 
             })
             .collect();
         let reordered = is_zip_out_of_order(&names);
-        names.sort();
+        names.sort_by(|a, b| natural_cmp(a, b));
 
         let mut count = 0;
         for name in &names {
@@ -575,7 +622,34 @@ fn find_unrar() -> Option<PathBuf> {
     None
 }
 
-fn render_pdf_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, String> {
+/// Run a child process to completion while honoring the cancel flag: polls
+/// for exit and kills the child if a cancel is requested mid-render. Returns
+/// whether the process exited successfully.
+fn run_with_cancel(
+    mut cmd: std::process::Command,
+    cancel: &AtomicBool,
+    tool: &str,
+) -> Result<bool, String> {
+    let mut child = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to run {tool}: {e}"))?;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Cancelled".to_string());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status.success()),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(e) => return Err(format!("{tool} failed: {e}")),
+        }
+    }
+}
+
+fn render_pdf_to_dir(input_path: &Path, dest_dir: &Path, cancel: &AtomicBool) -> Result<usize, String> {
     #[cfg(windows)]
     hide_console_window();
 
@@ -585,16 +659,12 @@ fn render_pdf_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, String
         "mutool",
     ]) {
         let pattern = dest_dir.join("page_%04d.png");
-        let status = std::process::Command::new(&mutool)
-            .args(["draw", "-o"])
+        let mut cmd = std::process::Command::new(&mutool);
+        cmd.args(["draw", "-o"])
             .arg(&pattern)
             .args(["-r", "150"])
-            .arg(input_path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|e| format!("Failed to run mutool: {e}"))?;
-        if status.success() {
+            .arg(input_path);
+        if run_with_cancel(cmd, cancel, "mutool")? {
             return collect_rendered_images(dest_dir);
         }
     }
@@ -605,15 +675,11 @@ fn render_pdf_to_dir(input_path: &Path, dest_dir: &Path) -> Result<usize, String
         "pdftoppm",
     ]) {
         let prefix = dest_dir.join("page");
-        let status = std::process::Command::new(&pdftoppm)
-            .args(["-png", "-r", "150"])
+        let mut cmd = std::process::Command::new(&pdftoppm);
+        cmd.args(["-png", "-r", "150"])
             .arg(input_path)
-            .arg(&prefix)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|e| format!("Failed to run pdftoppm: {e}"))?;
-        if status.success() {
+            .arg(&prefix);
+        if run_with_cancel(cmd, cancel, "pdftoppm")? {
             return collect_rendered_images(dest_dir);
         }
     }
@@ -684,7 +750,7 @@ fn collect_rendered_images(dir: &Path) -> Result<usize, String> {
         return Err("PDF rendering produced no images".to_string());
     }
 
-    images.sort();
+    images.sort_by(|a, b| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
     let count = images.len();
     for (i, img_path) in images.iter().enumerate() {
         let ext = img_path.extension().and_then(|e| e.to_str()).unwrap_or("png");
@@ -722,11 +788,13 @@ fn check_source_quality(input_path: &Path, target: u32, split: bool) -> Option<(
 
     let peek_mid = |buf: &[u8]| -> Option<(u32, u32, bool)> {
         let (w, h) = peek_image_dimensions(buf)?;
-        let landscape = w > h;
-        let effective_w = if landscape && split { w / 2 } else { w };
+        // Match process_image_split: a page is only halved when it is wide
+        // enough (w > h * 5/4), not merely landscape (w > h).
+        let will_split = split && w > h * 5 / 4;
+        let effective_w = if will_split { w / 2 } else { w };
         let too_small = target > 0 && (effective_w < target || h < target);
         if too_small {
-            Some((w, h, landscape))
+            Some((w, h, will_split))
         } else {
             None
         }
@@ -748,7 +816,7 @@ fn check_source_quality(input_path: &Path, target: u32, split: bool) -> Option<(
                 }
             })
             .collect();
-        names.sort();
+        names.sort_by(|a, b| natural_cmp(a, b));
         if names.is_empty() { return None; }
         let mid = names.len() / 2;
         let mut file = archive.by_name(&names[mid]).ok()?;
@@ -777,7 +845,7 @@ fn check_source_quality(input_path: &Path, target: u32, split: bool) -> Option<(
                 }
             })
             .collect();
-        imgs.sort();
+        imgs.sort_by(|a, b| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
         if imgs.is_empty() { return None; }
         let mid = imgs.len() / 2;
         let data = fs::read(&imgs[mid]).ok()?;
@@ -811,7 +879,7 @@ fn check_optimize_savings(
                 if is_image_ext(&lower) { Some(name) } else { None }
             })
             .collect();
-        names.sort();
+        names.sort_by(|a, b| natural_cmp(a, b));
         if names.is_empty() { return None; }
         let indices = pick_sample_indices(names.len(), sample_count);
         indices.iter().filter_map(|&i| {
@@ -839,7 +907,7 @@ fn check_optimize_savings(
                 if is_image_ext(&ext) { Some(path) } else { None }
             })
             .collect();
-        imgs.sort();
+        imgs.sort_by(|a, b| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
         if imgs.is_empty() { return None; }
         let indices = pick_sample_indices(imgs.len(), sample_count);
         indices.iter().filter_map(|&i| {
@@ -996,7 +1064,7 @@ fn optimize_dir_to_cbz(
             }
         })
         .collect();
-    images.sort();
+    images.sort_by(|a, b| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
 
     if images.is_empty() {
         return Err("No images found".to_string());
@@ -1006,7 +1074,12 @@ fn optimize_dir_to_cbz(
     emit_progress(app, 0, total, &format!("Processing 0/{total}"));
 
     let raw_images: Vec<Vec<u8>> = images.iter()
-        .map(|p| fs::read(p).map_err(|e| format!("Cannot read image: {e}")))
+        .map(|p| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Cancelled".to_string());
+            }
+            fs::read(p).map_err(|e| format!("Cannot read image: {e}"))
+        })
         .collect::<Result<_, _>>()?;
 
     let done = std::sync::atomic::AtomicUsize::new(0);
@@ -1102,9 +1175,12 @@ fn optimize_cbz(
         if is_zip_out_of_order(&names) {
             emit_progress(app, 0, 1, "Source archive had out-of-order pages, reordering...");
         }
-        names.sort();
+        names.sort_by(|a, b| natural_cmp(a, b));
 
         for name in &names {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Cancelled".to_string());
+            }
             let mut file = archive.by_name(name).map_err(|e| format!("Cannot read {name}: {e}"))?;
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).map_err(|e| format!("Read error: {e}"))?;
@@ -1129,8 +1205,11 @@ fn optimize_cbz(
                 }
             })
             .collect();
-        imgs.sort();
+        imgs.sort_by(|a, b| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
         for img_path in &imgs {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Cancelled".to_string());
+            }
             if let Ok(data) = fs::read(img_path) {
                 let name = img_path.file_name().unwrap_or_default().to_string_lossy().to_string();
                 entries.push((name, data));
@@ -1192,10 +1271,48 @@ fn optimize_pdf_file(
     cancel: &AtomicBool,
     app: &AppHandle,
 ) -> Result<(), String> {
-    emit_progress(app, 0, 1, "Loading PDF...");
+    // Cheap metadata read (~50ms even on huge PDFs) so the slow full load that
+    // follows shows the page count instead of looking hung. lopdf's full load
+    // is single-threaded and uncancellable; a large book can take many seconds.
+    let page_hint = lopdf::Document::load_metadata(input_path)
+        .map(|m| m.page_count)
+        .unwrap_or(0);
+    if page_hint >= 500 {
+        emit_progress(app, 0, 1, &format!("Loading PDF ({page_hint} pages, this can take a while)..."));
+    } else {
+        emit_progress(app, 0, 1, "Loading PDF...");
+    }
 
     let mut doc = lopdf::Document::load(input_path)
         .map_err(|e| format!("Cannot load PDF: {e}"))?;
+
+    // lopdf only decrypts RC4 revisions 2-3, not AES-256 (rev 5/6). Encrypted
+    // image streams would decode as garbage and silently optimize nothing, so
+    // decrypt via mutool into a temp PDF first, then optimize that. Keep the
+    // temp dir alive (`_decrypt_tmp`) until the function returns.
+    let _decrypt_tmp;
+    if doc.trailer.get(b"Encrypt").is_ok() {
+        emit_progress(app, 0, 1, "Decrypting PDF...");
+        let mutool = find_tool(&[
+            "/opt/homebrew/bin/mutool",
+            "/usr/local/bin/mutool",
+            "mutool",
+        ])
+        .ok_or("PDF is encrypted and mutool (mupdf-tools) is unavailable to decrypt it")?;
+
+        let dir = tempfile::TempDir::new().map_err(|e| format!("Cannot create temp dir: {e}"))?;
+        let decrypted = dir.path().join("decrypted.pdf");
+        let mut cmd = std::process::Command::new(&mutool);
+        cmd.arg("convert").arg("-o").arg(&decrypted).arg(input_path);
+        if !run_with_cancel(cmd, cancel, "mutool")? {
+            return Err("Failed to decrypt PDF (mutool convert failed)".to_string());
+        }
+        doc = lopdf::Document::load(&decrypted)
+            .map_err(|e| format!("Cannot load decrypted PDF: {e}"))?;
+        _decrypt_tmp = Some(dir);
+    } else {
+        _decrypt_tmp = None;
+    }
 
     let image_ids: Vec<lopdf::ObjectId> = doc
         .objects
@@ -1336,7 +1453,7 @@ fn recompress_pdf_image(
                     _ => return Err("Not a stream".to_string()),
                 };
                 let mut cloned = stream.clone();
-                cloned.decompress();
+                let _ = cloned.decompress();
                 cloned.content
             };
 
@@ -1384,7 +1501,11 @@ fn recompress_pdf_image(
     let diff = original_len as i64 - encoded.len() as i64;
 
     if let Some(lopdf::Object::Stream(ref mut s)) = doc.objects.get_mut(&id) {
+        let new_len = encoded.len();
         s.content = encoded;
+        // Keep /Length in sync with the replaced content, else strict readers
+        // (Preview, Adobe) flag "stream Length incorrect".
+        s.dict.set("Length", lopdf::Object::Integer(new_len as i64));
         s.dict.set("Filter", lopdf::Object::Name(b"DCTDecode".to_vec()));
         s.dict.remove(b"DecodeParms");
         if needs_resize {
@@ -1487,8 +1608,8 @@ pub async fn convert_comic(
     let min_res = options.min_resolution;
     let split = !options.no_split;
     if !is_pdf {
-        if let Some((src_w, src_h, landscape)) = check_source_quality(&input_path, min_res, split) {
-            let reason = if landscape && split {
+        if let Some((src_w, src_h, will_split)) = check_source_quality(&input_path, min_res, split) {
+            let reason = if will_split {
                 format!("low res after split ({}/2 x {src_h})", src_w)
             } else {
                 format!("low res ({src_w}x{src_h})")
@@ -1530,6 +1651,10 @@ pub async fn convert_comic(
         }
     }
 
+    if cancel.0.load(Ordering::Relaxed) {
+        return Err("Cancelled".to_string());
+    }
+
     let output_path = if options.device == "pdf-optimize" {
         if !is_pdf {
             return Err("PDF Optimize only works with PDF files".to_string());
@@ -1545,7 +1670,7 @@ pub async fn convert_comic(
             let tmp_dir = tempfile::TempDir::new()
                 .map_err(|e| format!("Cannot create temp dir: {e}"))?;
             emit_progress(&app, 0, 1, "Rendering PDF...");
-            render_pdf_to_dir(&input_path, tmp_dir.path())?;
+            render_pdf_to_dir(&input_path, tmp_dir.path(), &cancel.0)?;
             optimize_dir_to_cbz(tmp_dir.path(), &cbz_path, dev_w, dev_h, quality, options.contrast, grayscale, resize, !options.no_split, &cancel.0, &app)
                 .map_err(|e| { let _ = fs::remove_file(&cbz_path); e })?;
         } else {
@@ -1580,7 +1705,7 @@ pub async fn convert_comic(
 
         if is_pdf {
             emit_progress(&app, 0, 1, "Rendering PDF...");
-            render_pdf_to_dir(&input_path, tmp_dir.path())?;
+            render_pdf_to_dir(&input_path, tmp_dir.path(), &cancel.0)?;
         } else {
             emit_progress(&app, 0, 1, "Extracting archive...");
             let (_, reordered) = extract_archive_to_dir(&input_path, tmp_dir.path())?;
@@ -1753,6 +1878,32 @@ mod tests {
     }
 
     #[test]
+    fn natural_cmp_orders_pages_numerically() {
+        let mut v = vec![
+            "10.jpg".to_string(),
+            "2.jpg".to_string(),
+            "1.jpg".to_string(),
+            "11.jpg".to_string(),
+        ];
+        v.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(v, vec!["1.jpg", "2.jpg", "10.jpg", "11.jpg"]);
+    }
+
+    #[test]
+    fn natural_cmp_handles_prefixes_and_padding() {
+        let mut v = vec![
+            "page-9.png".to_string(),
+            "page-10.png".to_string(),
+            "page-1.png".to_string(),
+        ];
+        v.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(v, vec!["page-1.png", "page-9.png", "page-10.png"]);
+        let mut p = vec!["0002.jpg".to_string(), "0001.jpg".to_string()];
+        p.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(p, vec!["0001.jpg", "0002.jpg"]);
+    }
+
+    #[test]
     fn format_size_kilobytes() {
         assert_eq!(format_size(2048), "2.0 KB");
     }
@@ -1830,12 +1981,82 @@ mod tests {
     }
 
     #[test]
-    fn extract_images_from_cbz_preserves_order() {
+    fn extract_images_from_cbz_returns_nonempty_pages() {
         let images = extract_images_from_cbz(&fixture_path()).unwrap();
         assert!(images.len() >= 4, "expected at least 4 images, got {}", images.len());
         for img in &images {
             assert!(!img.is_empty());
         }
+    }
+
+    #[test]
+    fn extract_cbz_orders_pages_naturally() {
+        use std::io::Write;
+        // Scrambled archive order, distinct gray per page; natural sort must
+        // yield reading order 1, 2, 10 (not lexical 1, 10, 2).
+        let solid_jpeg = |luma: u8| -> Vec<u8> {
+            let img = image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+                128,
+                128,
+                image::Luma([luma]),
+            ));
+            encode_image(img, 4096, 4096, 90, false, true, false).unwrap()
+        };
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cbz_path = tmp.path().join("order.cbz");
+        let file = fs::File::create(&cbz_path).unwrap();
+        let mut zip_writer = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+
+        // (name, marker luma) — inserted out of natural order on purpose.
+        for (name, luma) in [("10.jpg", 150u8), ("2.jpg", 90u8), ("1.jpg", 30u8)] {
+            zip_writer.start_file(name, opts).unwrap();
+            zip_writer.write_all(&solid_jpeg(luma)).unwrap();
+        }
+        zip_writer.finish().unwrap();
+
+        let extracted = extract_images_from_cbz(&cbz_path).unwrap();
+        assert_eq!(extracted.len(), 3);
+
+        let markers: Vec<u8> = extracted
+            .iter()
+            .map(|raw| decode_image(raw).unwrap().to_luma8().get_pixel(64, 64).0[0])
+            .collect();
+        // Reading order 1(30), 2(90), 10(150) → markers strictly ascending.
+        assert!(
+            markers[0] < markers[1] && markers[1] < markers[2],
+            "pages not in natural order; markers={markers:?}"
+        );
+        assert!((markers[0] as i16 - 30).abs() < 10, "page 1 marker off: {}", markers[0]);
+        assert!((markers[1] as i16 - 90).abs() < 10, "page 2 marker off: {}", markers[1]);
+        assert!((markers[2] as i16 - 150).abs() < 10, "page 10 marker off: {}", markers[2]);
+    }
+
+    #[test]
+    fn split_threshold_matches_aspect_ratio() {
+        // process_image_split halves a page only when w > h * 5/4 (1.25:1),
+        // the same threshold check_source_quality uses.
+        let make = |w: u32, h: u32| -> Vec<u8> {
+            let img = image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+                w,
+                h,
+                image::Luma([128]),
+            ));
+            encode_image(img, 8192, 8192, 80, false, true, false).unwrap()
+        };
+
+        let wide = make(300, 200);
+        let pages = process_image_split(&wide, 600, 800, 80, false, true, false, true).unwrap();
+        assert_eq!(pages.len(), 2, "1.5:1 page should split");
+
+        let mild = make(220, 200);
+        let pages = process_image_split(&mild, 600, 800, 80, false, true, false, true).unwrap();
+        assert_eq!(pages.len(), 1, "1.1:1 page should not split");
+
+        let pages = process_image_split(&wide, 600, 800, 80, false, true, false, false).unwrap();
+        assert_eq!(pages.len(), 1, "split=false should never split");
     }
 
     #[test]
@@ -1856,6 +2077,7 @@ mod tests {
         assert_eq!(device_profile("kindle-oasis"), (1264, 1680, "kindle_oasis"));
         assert_eq!(device_profile("kobo-clara-hd"), (1072, 1448, "kobo_clara_hd"));
         assert_eq!(device_profile("optimize"), (2048, 2048, "optimized"));
+        assert_eq!(device_profile("pdf-optimize"), (1500, 1500, "pdf_optimized"));
         assert_eq!(device_profile("unknown"), (600, 800, "kindle4"));
     }
 
@@ -1868,11 +2090,26 @@ mod tests {
     }
 
     #[test]
-    fn quality_clamp() {
-        assert_eq!(0u8.clamp(1, 100), 1);
-        assert_eq!(50u8.clamp(1, 100), 50);
-        assert_eq!(100u8.clamp(1, 100), 100);
-        assert_eq!(255u8.clamp(1, 100), 100);
+    fn encode_image_handles_quality_bounds() {
+        // Exercises the real encoder at the clamp boundaries (1 and 100),
+        // not the std `clamp` fn. A gradient makes quality actually matter.
+        let make = || {
+            let mut b = image::GrayImage::new(64, 64);
+            for (x, y, p) in b.enumerate_pixels_mut() {
+                *p = image::Luma([((x * 5 + y * 3) % 256) as u8]);
+            }
+            image::DynamicImage::ImageLuma8(b)
+        };
+        let low = encode_image(make(), 64, 64, 1, false, true, false).unwrap();
+        let high = encode_image(make(), 64, 64, 100, false, true, false).unwrap();
+        assert!(!low.is_empty() && !high.is_empty());
+        assert_eq!(image_ext_from_bytes(&low), "jpg");
+        assert!(
+            high.len() > low.len(),
+            "q100 ({}) should exceed q1 ({})",
+            high.len(),
+            low.len()
+        );
     }
 
     #[test]
@@ -1899,12 +2136,37 @@ mod tests {
     }
 
     #[test]
-    fn optimize_skips_compact_source() {
-        // Requires local test file; silently passes if absent
-        let path = std::path::Path::new("/Users/skocho/Downloads/Alan Ford/Alan Ford 001 - Grupa Tnt(1969).cbz");
-        if !path.exists() { return; }
-        let result = check_optimize_savings(path, 2048, 2048, 10, false, true);
-        assert!(result.is_some(), "WebP source should skip — JPEG output would be larger");
+    fn optimize_skips_already_compact_source() {
+        use std::io::Write;
+        // Already-q10 pages: re-encoding at the same quality is near-idempotent,
+        // so projected savings stay under the 15% skip threshold.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cbz_path = tmp.path().join("compact.cbz");
+        let file = fs::File::create(&cbz_path).unwrap();
+        let mut zip_writer = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+
+        // High-frequency gradient so JPEG yields a non-trivial payload (not a
+        // degenerate flat image the encoder could crush further).
+        let mut img = image::GrayImage::new(256, 256);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = image::Luma([((x * 7 + y * 13) % 256) as u8]);
+        }
+        let dynimg = image::DynamicImage::ImageLuma8(img);
+        let page = encode_image(dynimg, 2048, 2048, 10, false, true, false).unwrap();
+
+        for i in 0..5 {
+            zip_writer.start_file(format!("{i:02}.jpg"), opts).unwrap();
+            zip_writer.write_all(&page).unwrap();
+        }
+        zip_writer.finish().unwrap();
+
+        let result = check_optimize_savings(&cbz_path, 2048, 2048, 10, false, true);
+        assert!(
+            result.is_some(),
+            "already-compact q10 source should skip; got {result:?}"
+        );
     }
 
 
