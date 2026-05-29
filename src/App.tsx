@@ -494,11 +494,21 @@ function App() {
       )}
 
       <div className="toolbar">
-        <span className="toolbar-label">Output</span>
+        <span className="toolbar-label">Target</span>
         <select
           className="toolbar-select"
           value={device}
-          onChange={(e) => setDevice(e.target.value)}
+          onChange={(e) => {
+            setDevice(e.target.value);
+            // Switching target invalidates the last result and its preview;
+            // keep comicPath so the same input can be re-converted.
+            setConvertResult(null);
+            setError("");
+            setMobiInfo(null);
+            setMobiPath("");
+            setPageImage("");
+            setCurrentPage(0);
+          }}
           disabled={converting}
         >
           <optgroup label="Kindle (MOBI)">

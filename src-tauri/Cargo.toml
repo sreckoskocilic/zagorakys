@@ -23,7 +23,7 @@ kindling = { git = "https://github.com/ciscoriordan/kindling", package = "kindli
 image = "0.25"
 rayon = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-lopdf = "0.40"
+lopdf = "0.40"  # keep >=0.40: 0.34 silently corrupts complex PDFs on save (broken xref/names)
 libc = "0.2"
 walkdir = "2"
 tauri-plugin-window-state = "2"
