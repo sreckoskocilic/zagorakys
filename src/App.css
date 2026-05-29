@@ -918,6 +918,18 @@ body {
   font-weight: 600;
 }
 
+.license-text {
+  color: var(--text-mid);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 .version-section {
   display: flex;
   flex-direction: column;

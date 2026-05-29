@@ -5,6 +5,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import licensesText from "../THIRD-PARTY-LICENSES.md?raw";
+import agplText from "../LICENSES/AGPL-3.0.txt?raw";
 
 interface ConvertResult {
   output_path: string;
@@ -65,6 +67,8 @@ function App() {
   const [convertResult, setConvertResult] = useState<ConvertResult | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [showLicenses, setShowLicenses] = useState(false);
+  const [showAgpl, setShowAgpl] = useState(false);
   const [noSplit, setNoSplit] = useState(() => localStorage.getItem("zagorakys-nosplit") === "true");
   const [device, setDevice] = useState(() => localStorage.getItem("zagorakys-device") || "kindle4");
   const [batchFiles, setBatchFiles] = useState<string[]>([]);
@@ -929,6 +933,12 @@ function App() {
                         {updating ? "Updating..." : `Update to v${updateAvailable.version}`}
                       </button>
                     )}
+                    <button
+                      className="setting-btn"
+                      onClick={() => { setShowLicenses(true); setShowSettings(false); }}
+                    >
+                      Open-source licenses
+                    </button>
                   </div>
                 )}
               </div>
@@ -961,6 +971,22 @@ function App() {
                   <span className="setting-group-label">Requirements</span>
                   <p className="help-text">CBR/RAR need unrar; PDF needs mutool or pdftoppm. On Windows both ship with the app.</p>
                 </div>
+              </div>
+            </div>
+          )}
+          {showLicenses && (
+            <div className="settings-slide">
+              <div className="settings-header">
+                <span className="settings-title">Open-source licenses</span>
+                <button className="settings-close" onClick={() => setShowLicenses(false)}>
+                  &times;
+                </button>
+              </div>
+              <div className="settings-body">
+                <pre className="license-text">{showAgpl ? agplText : licensesText}</pre>
+                <button className="setting-btn" onClick={() => setShowAgpl(!showAgpl)}>
+                  {showAgpl ? "Back to notices" : "Show full AGPL-3.0 text"}
+                </button>
               </div>
             </div>
           )}
