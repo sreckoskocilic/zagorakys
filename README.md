@@ -10,6 +10,26 @@ Supports CBR, CBZ, RAR, ZIP, and PDF files.
 2. Download the `.exe` installer
 3. Run it. Windows will show a SmartScreen warning since the app isn't signed — click "More info" then "Run anyway"
 
+## Run from source
+
+Works on Windows, macOS, and Linux.
+
+You'll need [Node.js](https://nodejs.org), the [Rust toolchain](https://rustup.rs), and the [Tauri system dependencies](https://tauri.app/start/prerequisites/) for your OS.
+
+For CBR extraction and PDF rendering, the app calls out to `unrar` and `mutool`:
+
+- **Windows** — nothing to install, both ship bundled in `src-tauri/resources/`
+- **macOS** — `brew install unrar mupdf-tools`
+- **Linux** — `apt install unrar mupdf-tools` (or `poppler-utils` if you'd rather use `pdftoppm`)
+
+Then:
+
+```bash
+npm install
+npm run serve        # dev mode, hot reload
+npm run tauri build  # release build, installer lands in src-tauri/target/release/bundle/
+```
+
 ## How to use
 
 1. Open the app
